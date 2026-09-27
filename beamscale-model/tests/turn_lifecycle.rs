@@ -82,8 +82,7 @@ impl TurnLifecycleModel {
     }
 
     fn expire(&mut self, now_tick: u64) {
-        self.active
-            .retain(|_, turn| turn.deadline_tick > now_tick);
+        self.active.retain(|_, turn| turn.deadline_tick > now_tick);
     }
 
     fn complete(&mut self, handle: &Handle) -> bool {
