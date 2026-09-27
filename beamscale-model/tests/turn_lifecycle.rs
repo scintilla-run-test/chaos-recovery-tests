@@ -125,12 +125,8 @@ fn abandoned_live_caller_is_released_at_fixed_deadline() {
 #[test]
 fn caller_death_releases_only_that_callers_turns() {
     let mut model = TurnLifecycleModel::new(7);
-    model
-        .begin("a", "r1", "caller-a", 100, 20)
-        .expect("a turn");
-    let b = model
-        .begin("b", "r2", "caller-b", 100, 20)
-        .expect("b turn");
+    model.begin("a", "r1", "caller-a", 100, 20).expect("a turn");
+    let b = model.begin("b", "r2", "caller-b", 100, 20).expect("b turn");
     model.caller_died("caller-a");
     assert_eq!(model.active_count(), 1);
     assert!(model.complete(&b));
