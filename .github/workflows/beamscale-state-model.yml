@@ -1,0 +1,41 @@
+name: BeamScale invariant model
+
+on:
+  pull_request:
+    paths:
+      - 'beamscale-model/**'
+      - 'evidence/beamscale-source-lock.json'
+      - '.github/workflows/beamscale-state-model.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beamscale-model-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  model:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt, clippy
+      - name: Verify source-lock shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.schema_version == "beamscale-proof-source-lock.v1"' evidence/beamscale-source-lock.json >/dev/null
+          jq -er '.sources["beamscale/bmscl-supervisor"] | select(test("^[0-9a-f]{40}$"))' evidence/beamscale-source-lock.json >/dev/null
+          jq -er '.sources["beamscale/bmscl-infra"] | select(test("^[0-9a-f]{40}$"))' evidence/beamscale-source-lock.json >/dev/null
+      - name: Format
+        run: cargo fmt --manifest-path beamscale-model/Cargo.toml -- --check
+      - name: Lint
+        run: cargo clippy --manifest-path beamscale-model/Cargo.toml --all-targets -- -D warnings
+      - name: Run deterministic invariant suite
+        run: cargo test --manifest-path beamscale-model/Cargo.toml --all-targets -- --nocapture
