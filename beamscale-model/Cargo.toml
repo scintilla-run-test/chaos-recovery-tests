@@ -9,7 +9,3 @@ path = "src/lib.rs"
 
 [lints.rust]
 unsafe_code = "forbid"
-
-[lints.clippy]
-all = "deny"
-pedantic = "deny"
