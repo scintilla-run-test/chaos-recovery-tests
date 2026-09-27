@@ -6,7 +6,7 @@
   },
   "proof_targets": {
     "durable_actor_turn_lifecycle": "8911bc368a5d410e6b38a5332576fcb57186a7df",
-    "durable_queue_explicit_local_durability": "f5c0c0e440b4703b0250eb9b36d68a5d0bcc4725",
+    "durable_queue_explicit_local_durability": "d39e730b3a3538e7f3235f2c795912d940dc8b76",
     "durable_lock_fail_stop_ambiguity": "f55bf83cd8db93346883d3c8135eb7a098463178"
   },
   "note": "Public models only. No private BeamScale source is copied into this repository. proof_targets are private candidate SHAs used as audit provenance, not source retrieval."
