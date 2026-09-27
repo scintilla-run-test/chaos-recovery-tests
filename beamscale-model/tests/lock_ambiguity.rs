@@ -201,12 +201,7 @@ fn known_precommit_failure_also_fail_stops_instead_of_guessing() {
     let mut store = Store::new();
     let mut actor = LockActor::load(&store);
     assert_eq!(
-        actor.acquire(
-            &mut store,
-            "holder-a",
-            200,
-            PersistMode::FailBeforeCommit
-        ),
+        actor.acquire(&mut store, "holder-a", 200, PersistMode::FailBeforeCommit),
         Err(PersistError::FailedBeforeCommit)
     );
     assert!(!actor.authoritative);
