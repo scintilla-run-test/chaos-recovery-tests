@@ -33,8 +33,17 @@ jobs:
           jq -e '.schema_version == "beamscale-proof-source-lock.v1"' evidence/beamscale-source-lock.json >/dev/null
           jq -er '.sources["beamscale/bmscl-supervisor"] | select(test("^[0-9a-f]{40}$"))' evidence/beamscale-source-lock.json >/dev/null
           jq -er '.sources["beamscale/bmscl-infra"] | select(test("^[0-9a-f]{40}$"))' evidence/beamscale-source-lock.json >/dev/null
-      - name: Format
-        run: cargo fmt --manifest-path beamscale-model/Cargo.toml -- --check
+      - name: Produce canonical rustfmt output
+        run: cargo fmt --manifest-path beamscale-model/Cargo.toml
+      - name: Upload canonical rustfmt output
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: beamscale-rustfmt-output
+          path: beamscale-model
+          retention-days: 1
+      - name: Require committed formatting
+        shell: bash
+        run: git diff --exit-code -- beamscale-model
       - name: Lint
         run: cargo clippy --manifest-path beamscale-model/Cargo.toml --all-targets -- -D warnings
       - name: Run deterministic invariant suite
