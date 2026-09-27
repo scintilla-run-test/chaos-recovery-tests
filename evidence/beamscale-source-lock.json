@@ -1,8 +1,8 @@
 {
   "schema_version": "beamscale-proof-source-lock.v1",
   "sources": {
-    "beamscale/bmscl-supervisor": "f62a104d107480c444ae2f6a4579af4746bbd1f0",
+    "beamscale/bmscl-supervisor": "8911bc368a5d410e6b38a5332576fcb57186a7df",
     "beamscale/bmscl-infra": "520b168973f6313ffcad8b193414eb13f782bcef"
   },
-  "note": "Public model only. No private BeamScale source is copied into this repository. These SHAs identify the private revisions whose documented invariants were audited when the model was authored."
+  "note": "Public model only. No private BeamScale source is copied into this repository. The supervisor SHA may identify an unmerged private hardening candidate; it is provenance, not source retrieval."
 }
