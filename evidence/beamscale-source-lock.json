@@ -1,8 +1,13 @@
 {
   "schema_version": "beamscale-proof-source-lock.v1",
   "sources": {
-    "beamscale/bmscl-supervisor": "8911bc368a5d410e6b38a5332576fcb57186a7df",
+    "beamscale/bmscl-supervisor": "f62a104d107480c444ae2f6a4579af4746bbd1f0",
     "beamscale/bmscl-infra": "520b168973f6313ffcad8b193414eb13f782bcef"
   },
-  "note": "Public model only. No private BeamScale source is copied into this repository. The supervisor SHA may identify an unmerged private hardening candidate; it is provenance, not source retrieval."
+  "proof_targets": {
+    "durable_actor_turn_lifecycle": "8911bc368a5d410e6b38a5332576fcb57186a7df",
+    "durable_queue_explicit_local_durability": "f5c0c0e440b4703b0250eb9b36d68a5d0bcc4725",
+    "durable_lock_fail_stop_ambiguity": "f55bf83cd8db93346883d3c8135eb7a098463178"
+  },
+  "note": "Public models only. No private BeamScale source is copied into this repository. proof_targets are private candidate SHAs used as audit provenance, not source retrieval."
 }
