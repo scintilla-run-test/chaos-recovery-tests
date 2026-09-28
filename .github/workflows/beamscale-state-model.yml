@@ -33,6 +33,7 @@ jobs:
           jq -e '.schema_version == "beamscale-proof-source-lock.v1"' evidence/beamscale-source-lock.json >/dev/null
           jq -er '.sources["beamscale/bmscl-supervisor"] | select(test("^[0-9a-f]{40}$"))' evidence/beamscale-source-lock.json >/dev/null
           jq -er '.sources["beamscale/bmscl-infra"] | select(test("^[0-9a-f]{40}$"))' evidence/beamscale-source-lock.json >/dev/null
+          jq -e '(.proof_targets // {}) | to_entries | all(.value | test("^[0-9a-f]{40}$"))' evidence/beamscale-source-lock.json >/dev/null
       - name: Format
         run: cargo fmt --manifest-path beamscale-model/Cargo.toml -- --check
       - name: Lint
