@@ -1,0 +1,214 @@
+name: wasm-xprs instrumented restart and deploy race proof v4
+
+on:
+  push:
+    branches:
+      - probe/wasmx-restart-race-v4-20260928
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  restart-race:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact merged daemon main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: wasm-xprs/wasmx-desktop-daemon
+          ref: 9906d0bdfc4fe1760fca75569670f91e793e1c85
+          path: daemon
+          persist-credentials: false
+
+      - name: Install Rust 1.96
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.96.0
+
+      - name: Build daemon
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path daemon/Cargo.toml
+
+      - name: Instrument identical and mixed immutable deploy races
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PROOF_HOME="$RUNNER_TEMP/wasmx-chaos-home"
+          export PROOF_ARTIFACTS="$RUNNER_TEMP/wasmx-chaos-artifacts"
+          mkdir -p "$PROOF_HOME"
+          HOME="$PROOF_HOME" WASMX_ARTIFACT_ROOT="$PROOF_ARTIFACTS" \
+            ./daemon/target/debug/wasmx-desktop-daemon >"$RUNNER_TEMP/daemon.log" 2>&1 &
+          DAEMON_PID=$!
+          cleanup() {
+            kill "$DAEMON_PID" 2>/dev/null || true
+            wait "$DAEMON_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 80); do
+            if curl -fsS http://127.0.0.1:8766/healthz >/dev/null; then
+              break
+            fi
+            sleep 0.25
+          done
+          TOKEN=$(cat "$PROOF_HOME/.wasm-xprs/daemon/token")
+          export TOKEN RUNNER_TEMP
+
+          python3 - <<'PY'
+          import base64
+          import concurrent.futures
+          import json
+          import os
+          import pathlib
+          import urllib.error
+          import urllib.request
+
+          token = os.environ['TOKEN']
+          tmp = pathlib.Path(os.environ['RUNNER_TEMP'])
+          endpoint = 'http://127.0.0.1:8766/v1/deploy'
+          module_a = bytes.fromhex(
+              '0061736d01000000'
+              '0105016000017f'
+              '03020100'
+              '0503010001'
+              '071702066d656d6f727902000a7761736d785f6d61696e0000'
+              '0a0601040041000b'
+          )
+          module_b = bytes.fromhex(
+              '0061736d01000000'
+              '0105016000017f'
+              '03020100'
+              '0503010001'
+              '071702066d656d6f727902000a7761736d785f6d61696e0000'
+              '0a0601040041010b'
+          )
+
+          def deploy(deployment, module):
+              body = json.dumps({
+                  'tenant_id': 'chaos-tenant',
+                  'deployment_id': deployment,
+                  'wasm_base64': base64.b64encode(module).decode(),
+              }).encode()
+              req = urllib.request.Request(
+                  endpoint,
+                  data=body,
+                  method='POST',
+                  headers={
+                      'Authorization': f'Bearer {token}',
+                      'Content-Type': 'application/json',
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      return resp.status, resp.read().decode(errors='replace')
+              except urllib.error.HTTPError as error:
+                  return error.code, error.read().decode(errors='replace')
+              except Exception as error:
+                  return 'EXCEPTION', repr(error)
+
+          def run_identical(width):
+              deployment = f'identical-{width}'
+              with concurrent.futures.ThreadPoolExecutor(max_workers=width) as pool:
+                  results = list(pool.map(lambda _: deploy(deployment, module_a), range(width)))
+              counts = {}
+              for status, _ in results:
+                  counts[str(status)] = counts.get(str(status), 0) + 1
+              print(f'identical width={width} counts={counts}', flush=True)
+              for index, (status, body) in enumerate(results):
+                  if status != 200:
+                      print(f'identical width={width} index={index} status={status} body={body}', flush=True)
+              return results
+
+          all_identical = {}
+          for width in (2, 4, 8, 16, 32):
+              results = run_identical(width)
+              all_identical[width] = results
+              if any(status != 200 for status, _ in results):
+                  pathlib.Path(tmp/'identical-failure.json').write_text(json.dumps({
+                      str(w): [{'status': s, 'body': b} for s, b in rs]
+                      for w, rs in all_identical.items()
+                  }, indent=2))
+                  raise SystemExit(f'identical-byte race failed at concurrency {width}')
+
+          with concurrent.futures.ThreadPoolExecutor(max_workers=24) as pool:
+              futures = []
+              for index in range(24):
+                  module = module_a if index % 2 == 0 else module_b
+                  futures.append(pool.submit(deploy, 'mixed-bytes', module))
+              mixed = [future.result() for future in futures]
+          counts = {}
+          for status, _ in mixed:
+              counts[str(status)] = counts.get(str(status), 0) + 1
+          print(f'mixed counts={counts}', flush=True)
+          for index, (status, body) in enumerate(mixed):
+              if status not in (200, 409):
+                  print(f'mixed index={index} status={status} body={body}', flush=True)
+          if not all(status in (200, 409) for status, _ in mixed):
+              raise SystemExit('mixed-byte race returned an unexpected status')
+          if not any(status == 200 for status, _ in mixed):
+              raise SystemExit('mixed-byte race had no winning deployment')
+          if not any(status == 409 for status, _ in mixed):
+              raise SystemExit('mixed-byte race did not reject the losing identity')
+          PY
+
+      - name: Prove restart stability and post-restart tamper detection
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PROOF_HOME="$RUNNER_TEMP/wasmx-chaos-home"
+          export PROOF_ARTIFACTS="$RUNNER_TEMP/wasmx-chaos-artifacts"
+          TOKEN=$(cat "$PROOF_HOME/.wasm-xprs/daemon/token")
+          curl -fsS -H "Authorization: Bearer $TOKEN" \
+            http://127.0.0.1:8766/v1/deployments/chaos-tenant/identical-32 >"$RUNNER_TEMP/before.json"
+          BEFORE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$RUNNER_TEMP/before.json")
+
+          pkill -f '/wasmx-desktop-daemon' || true
+          for attempt in $(seq 1 40); do
+            if ! curl -fsS http://127.0.0.1:8766/healthz >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.1
+          done
+          HOME="$PROOF_HOME" WASMX_ARTIFACT_ROOT="$PROOF_ARTIFACTS" \
+            ./daemon/target/debug/wasmx-desktop-daemon >"$RUNNER_TEMP/restarted.log" 2>&1 &
+          RESTARTED_PID=$!
+          cleanup() {
+            kill "$RESTARTED_PID" 2>/dev/null || true
+            wait "$RESTARTED_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 80); do
+            if curl -fsS http://127.0.0.1:8766/healthz >/dev/null; then
+              break
+            fi
+            sleep 0.25
+          done
+          TOKEN=$(cat "$PROOF_HOME/.wasm-xprs/daemon/token")
+          curl -fsS -H "Authorization: Bearer $TOKEN" \
+            http://127.0.0.1:8766/v1/deployments/chaos-tenant/identical-32 >"$RUNNER_TEMP/after.json"
+          AFTER_SHA=$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["integrity_verified"] is True; print(v["sha256"])' "$RUNNER_TEMP/after.json")
+          test "$BEFORE_SHA" = "$AFTER_SHA"
+
+          kill "$RESTARTED_PID"
+          wait "$RESTARTED_PID" || true
+          trap - EXIT
+          printf 'tampered' >"$PROOF_ARTIFACTS/chaos-tenant/identical-32/module.wasm"
+          HOME="$PROOF_HOME" WASMX_ARTIFACT_ROOT="$PROOF_ARTIFACTS" \
+            ./daemon/target/debug/wasmx-desktop-daemon >"$RUNNER_TEMP/tampered.log" 2>&1 &
+          TAMPER_PID=$!
+          trap 'kill "$TAMPER_PID" 2>/dev/null || true; wait "$TAMPER_PID" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 80); do
+            if curl -fsS http://127.0.0.1:8766/healthz >/dev/null; then
+              break
+            fi
+            sleep 0.25
+          done
+          TOKEN=$(cat "$PROOF_HOME/.wasm-xprs/daemon/token")
+          code=$(curl -sS -o "$RUNNER_TEMP/tamper.out" -w '%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" \
+            http://127.0.0.1:8766/v1/deployments/chaos-tenant/identical-32)
+          echo "tamper status=$code body=$(cat "$RUNNER_TEMP/tamper.out")"
+          test "$code" = 500
