@@ -1,0 +1,104 @@
+name: wasm-xprs restart and tamper recovery proof v5
+
+on:
+  push:
+    branches:
+      - probe/wasmx-restart-tamper-v5-20260928
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact merged daemon main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: wasm-xprs/wasmx-desktop-daemon
+          ref: 9906d0bdfc4fe1760fca75569670f91e793e1c85
+          path: daemon
+          persist-credentials: false
+      - name: Install Rust 1.96
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.96.0
+      - name: Build daemon
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path daemon/Cargo.toml
+      - name: Deploy, restart twice, and fail closed after disk tamper
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PROOF_HOME="$RUNNER_TEMP/wasmx-recovery-home"
+          export PROOF_ARTIFACTS="$RUNNER_TEMP/wasmx-recovery-artifacts"
+          mkdir -p "$PROOF_HOME"
+
+          start_daemon() {
+            HOME="$PROOF_HOME" WASMX_ARTIFACT_ROOT="$PROOF_ARTIFACTS" \
+              ./daemon/target/debug/wasmx-desktop-daemon >"$RUNNER_TEMP/daemon-$1.log" 2>&1 &
+            DAEMON_PID=$!
+            for attempt in $(seq 1 80); do
+              if curl -fsS http://127.0.0.1:8766/healthz >/dev/null; then
+                return 0
+              fi
+              sleep 0.25
+            done
+            cat "$RUNNER_TEMP/daemon-$1.log" >&2
+            return 1
+          }
+          stop_daemon() {
+            kill "$DAEMON_PID" 2>/dev/null || true
+            wait "$DAEMON_PID" 2>/dev/null || true
+          }
+          trap 'stop_daemon' EXIT
+
+          python3 - <<'PY'
+          import base64, json, pathlib
+          module = bytes.fromhex(
+              '0061736d01000000'
+              '0105016000017f'
+              '03020100'
+              '0503010001'
+              '071702066d656d6f727902000a7761736d785f6d61696e0000'
+              '0a0601040041000b'
+          )
+          pathlib.Path('deploy.json').write_text(json.dumps({
+              'tenant_id': 'recovery-tenant',
+              'deployment_id': 'generation-1',
+              'wasm_base64': base64.b64encode(module).decode(),
+          }))
+          PY
+
+          start_daemon first
+          TOKEN=$(cat "$PROOF_HOME/.wasm-xprs/daemon/token")
+          curl -fsS -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+            --data-binary @deploy.json http://127.0.0.1:8766/v1/deploy >"$RUNNER_TEMP/deploy.out"
+          curl -fsS -H "Authorization: Bearer $TOKEN" \
+            http://127.0.0.1:8766/v1/deployments/recovery-tenant/generation-1 >"$RUNNER_TEMP/before.json"
+          BEFORE_SHA=$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["integrity_verified"] is True; print(v["sha256"])' "$RUNNER_TEMP/before.json")
+          TOKEN_BEFORE="$TOKEN"
+
+          stop_daemon
+          start_daemon second
+          TOKEN=$(cat "$PROOF_HOME/.wasm-xprs/daemon/token")
+          test "$TOKEN" = "$TOKEN_BEFORE"
+          curl -fsS -H "Authorization: Bearer $TOKEN" \
+            http://127.0.0.1:8766/v1/deployments/recovery-tenant/generation-1 >"$RUNNER_TEMP/after.json"
+          AFTER_SHA=$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); assert v["integrity_verified"] is True; print(v["sha256"])' "$RUNNER_TEMP/after.json")
+          test "$BEFORE_SHA" = "$AFTER_SHA"
+
+          stop_daemon
+          printf 'tampered' >"$PROOF_ARTIFACTS/recovery-tenant/generation-1/module.wasm"
+          start_daemon tampered
+          TOKEN=$(cat "$PROOF_HOME/.wasm-xprs/daemon/token")
+          code=$(curl -sS -o "$RUNNER_TEMP/tamper.out" -w '%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" \
+            http://127.0.0.1:8766/v1/deployments/recovery-tenant/generation-1)
+          echo "tamper status=$code body=$(cat "$RUNNER_TEMP/tamper.out")"
+          test "$code" = 500
+          grep -Eqi 'integrity|artifact|sha256|module' "$RUNNER_TEMP/tamper.out"
