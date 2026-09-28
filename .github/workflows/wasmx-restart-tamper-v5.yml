@@ -1,9 +1,9 @@
-name: wasm-xprs restart and tamper recovery proof v5
+name: wasm-xprs restart and tamper recovery proof v6
 
 on:
   push:
     branches:
-      - probe/wasmx-restart-tamper-v5-20260928
+      - probe/wasmx-restart-tamper-v6-20260928
   workflow_dispatch:
 
 permissions:
@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --manifest-path daemon/Cargo.toml
-      - name: Deploy, restart twice, and fail closed after disk tamper
+      - name: Deploy, restart twice, detect tamper, and prove redaction
         shell: bash
         run: |
           set -euo pipefail
@@ -99,6 +99,15 @@ jobs:
           code=$(curl -sS -o "$RUNNER_TEMP/tamper.out" -w '%{http_code}' \
             -H "Authorization: Bearer $TOKEN" \
             http://127.0.0.1:8766/v1/deployments/recovery-tenant/generation-1)
-          echo "tamper status=$code body=$(cat "$RUNNER_TEMP/tamper.out")"
+          body=$(cat "$RUNNER_TEMP/tamper.out")
+          echo "tamper status=$code body=$body"
           test "$code" = 500
-          grep -Eqi 'integrity|artifact|sha256|module' "$RUNNER_TEMP/tamper.out"
+          test "$body" = 'internal server error'
+          if grep -Fq "$BEFORE_SHA" "$RUNNER_TEMP/tamper.out"; then
+            echo 'tamper response leaked the expected digest' >&2
+            exit 1
+          fi
+          if grep -Fq "$PROOF_ARTIFACTS" "$RUNNER_TEMP/tamper.out"; then
+            echo 'tamper response leaked the artifact path' >&2
+            exit 1
+          fi
