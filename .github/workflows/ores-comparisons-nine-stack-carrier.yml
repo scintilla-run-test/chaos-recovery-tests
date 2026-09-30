@@ -1,0 +1,141 @@
+name: ores-comparisons nine-stack carrier
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ores-comparisons-nine-stack-carrier.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  nine-stack-carrier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ORES_COMPARISONS_SHA: 25d53f834a9e2bcde4e8593f4beefc61e48894e6
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Fetch exact merged ores-comparisons revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init "$RUNNER_TEMP/ores-comparisons"
+          git -C "$RUNNER_TEMP/ores-comparisons" remote add origin https://github.com/ORESoftware/ores-comparisons.git
+          git -C "$RUNNER_TEMP/ores-comparisons" fetch --depth 1 origin "$ORES_COMPARISONS_SHA"
+          git -C "$RUNNER_TEMP/ores-comparisons" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/ores-comparisons" rev-parse HEAD)" = "$ORES_COMPARISONS_SHA"
+
+      - name: Run static authority and topology gates
+        shell: bash
+        working-directory: ${{ runner.temp }}/ores-comparisons
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_project_matrix.py
+          python3 scripts/verify_stack_catalog.py
+          python3 scripts/verify_dummy_org_map.py
+          python3 scripts/verify_dummy_org_gitlinks.py
+          python3 scripts/verify_project_repo_layout.py
+          python3 scripts/verify_benchmark_matrix.py
+          python3 scripts/verify_workflow_pins.py
+          python3 scripts/verify_adversarial_fixtures.py
+
+      - name: Assert exact nine-stack registration boundary
+        shell: bash
+        working-directory: ${{ runner.temp }}/ores-comparisons
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path('.')
+          catalog = json.loads((root / 'shared/stack-catalog.json').read_text())
+          matrix = json.loads((root / 'shared/project-matrix.json').read_text())
+          expected = {
+              'scintilla-run', 'beamscale', 'ores-stack',
+              'pony-expres', 'wasm-xprs', 'iso-lattes',
+              'graal-show', 'lunatic-lorry', 'litegraph',
+          }
+          materialized = {'scintilla-run', 'beamscale', 'ores-stack'}
+          registered_only = expected - materialized
+          entries = {item['id']: item for item in catalog['stacks']}
+          assert set(entries) == expected, (set(entries), expected)
+          assert {k for k, v in entries.items() if v['status'] == 'materialized'} == materialized
+          assert {k for k, v in entries.items() if v['status'] == 'registered'} == registered_only
+          assert {item['stack'] for item in matrix['projects']} == materialized
+          for stack in expected:
+              assert (root / 'stacks' / stack).is_dir(), stack
+          print('nine-stack boundary OK')
+          PY
+
+      - name: Prove registration promotion is fail-closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a "$RUNNER_TEMP/ores-comparisons" "$RUNNER_TEMP/ores-comparisons-mutation"
+          cd "$RUNNER_TEMP/ores-comparisons-mutation"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('shared/stack-catalog.json')
+          data = json.loads(path.read_text())
+          for item in data['stacks']:
+              if item['id'] == 'pony-expres':
+                  item['status'] = 'materialized'
+          path.write_text(json.dumps(data, indent=2) + '\n')
+          PY
+          if python3 scripts/verify_stack_catalog.py; then
+            echo 'ERROR: catalog verifier admitted a fake materialized stack' >&2
+            exit 1
+          fi
+          echo 'fail-closed materialization gate OK'
+
+      - name: Exercise all admitted benchmark identities and reject registered-only stacks
+        shell: bash
+        working-directory: ${{ runner.temp }}/ores-comparisons
+        run: |
+          set -euo pipefail
+          python3 -m http.server 18765 --bind 127.0.0.1 >"$RUNNER_TEMP/ores-comparisons-http.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" >/dev/null 2>&1 || true' EXIT
+          for _ in {1..40}; do
+            curl --fail --silent http://127.0.0.1:18765/ >/dev/null && break
+            sleep 0.1
+          done
+
+          python3 - <<'PY' >"$RUNNER_TEMP/benchmark-pairs.txt"
+          import json
+          matrix = json.load(open('shared/project-matrix.json'))
+          for item in matrix['projects']:
+              if item.get('benchmark') is True:
+                  print(item['stack'], item['scenario'])
+          PY
+
+          while read -r stack scenario; do
+            python3 scripts/run_benchmark.py \
+              --stack "$stack" \
+              --scenario "$scenario" \
+              --url http://127.0.0.1:18765/ \
+              --requests 1 \
+              --warmup 0 \
+              --output "$RUNNER_TEMP/benchmark-${stack}-${scenario}.json"
+          done <"$RUNNER_TEMP/benchmark-pairs.txt"
+
+          for stack in pony-expres wasm-xprs iso-lattes graal-show lunatic-lorry litegraph; do
+            if python3 scripts/run_benchmark.py \
+              --stack "$stack" \
+              --scenario http-observability \
+              --url http://127.0.0.1:18765/ \
+              --requests 1 \
+              --warmup 0 \
+              --output "$RUNNER_TEMP/should-not-exist-${stack}.json" \
+              >"$RUNNER_TEMP/reject-${stack}.out" 2>&1; then
+              echo "ERROR: registered-only stack became runnable: $stack" >&2
+              exit 1
+            fi
+          done
+          echo 'benchmark admission boundary OK'
