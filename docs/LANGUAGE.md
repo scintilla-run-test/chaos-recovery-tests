@@ -876,7 +876,7 @@ pub gpu fnc add(
   GpuArray<f32> b,
   GpuArray<f32> mut out
 ) => void {
-  let u64 i = gpu.index;
+  val u64 i = gpu.index;
   out[i] = a[i] + b[i];
   return;
 }
@@ -933,7 +933,7 @@ the lambda pipes/arrows:
 
 ```ores
 const fill = gpu (GpuArray<f32> mut out) {
-  let u64 i = gpu.index;
+  val u64 i = gpu.index;
   out[i] = 1.0;
   return;
 };
@@ -957,6 +957,13 @@ not a separate type-system rule.
 The compiler emits hidden lengths for every flat buffer and bounds-checks indexed access.
 Buffers emitted with `restrict` carry a no-alias launch contract that the physical
 launcher must enforce.
+
+For explicit SIMT kernels, mutable-buffer stores must also be race-free. The current
+conservative proof accepts a direct `gpu.index` / `gpu.global_id(0)` index or an
+immutable `val`/`const` alias of that identity. Constant indices, `gpu.local_id(0)`,
+`gpu.group_id(0)`, mutable aliases, and hidden mutable-buffer helper writes are rejected
+until the compiler has a stronger injectivity/interprocedural proof. This keeps the
+default kernel model data-race-free instead of merely parallel.
 
 ### Effects and control flow
 

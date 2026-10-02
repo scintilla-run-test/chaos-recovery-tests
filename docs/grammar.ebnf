@@ -273,6 +273,10 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - A kernel that explicitly uses gpu.index/gpu.*_id is data-parallel. Its 1-D
      extent comes from the unique mutable buffer parameter, or from the sole buffer when
      there is no mutable buffer. Ambiguous launch drivers are compile errors.
+   - Mutable-buffer stores in explicit SIMT kernels must be indexed by gpu.index /
+     gpu.global_id(0), or an immutable val/const alias of that identity. The conservative
+     first proof rejects local/group IDs, constants, mutable aliases, and hidden mutable
+     helper writes rather than permitting unproven inter-work-item races.
    - A canonical top-level index loop may still lower to get_global_id(0) for compatibility
      when mutable buffer access is proven elementwise; otherwise lowering preserves
      single-work-item semantics.

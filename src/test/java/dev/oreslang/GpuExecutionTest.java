@@ -552,7 +552,7 @@ final class GpuExecutionTest {
         OresCompiler.CompilationResult compilation = OresCompiler.compile("""
                 fnc host() => void {
                   const kernel = gpu (GpuArray<f32> mut out) {
-                    let u64 i = gpu.index;
+                    val u64 i = gpu.index;
                     out[i] = 1.0;
                     return;
                   };
@@ -574,7 +574,7 @@ final class GpuExecutionTest {
                   GpuArray<f32> b,
                   GpuArray<f32> mut out
                 ) => void {
-                  let u64 i = gpu.index;
+                  val u64 i = gpu.index;
                   out[i] = a[i] + b[i];
                   return;
                 }
@@ -604,6 +604,46 @@ final class GpuExecutionTest {
         assertEquals("__ores_len_values", kernel.launchPlan().resultSlotsExpression());
         assertTrue(compilation.gpuProgram().source()
                 .contains("__ores_out[get_global_id(0)] = "));
+    }
+
+    @Test
+    void simtMutableBufferWritesRequireAUniqueGlobalWorkItemIndex() {
+        IllegalArgumentException constant = assertThrows(IllegalArgumentException.class,
+                () -> OresCompiler.compile("""
+                        gpu fnc bad(GpuArray<i32> mut out) => void {
+                          out[0] = 1;
+                          val u64 ignored = gpu.index;
+                          return;
+                        }
+                        """));
+        assertTrue(constant.getMessage().contains("cannot prove this store race-free"));
+
+        IllegalArgumentException local = assertThrows(IllegalArgumentException.class,
+                () -> OresCompiler.compile("""
+                        gpu fnc bad(GpuArray<i32> mut out) => void {
+                          out[gpu.local_id(0)] = 1;
+                          return;
+                        }
+                        """));
+        assertTrue(local.getMessage().contains("gpu.index/gpu.global_id(0)"));
+
+        IllegalArgumentException mutableAlias = assertThrows(IllegalArgumentException.class,
+                () -> OresCompiler.compile("""
+                        gpu fnc bad(GpuArray<i32> mut out) => void {
+                          let u64 i = gpu.index;
+                          out[i] = 1;
+                          return;
+                        }
+                        """));
+        assertTrue(mutableAlias.getMessage().contains("immutable val/const alias"));
+
+        assertDoesNotThrow(() -> OresCompiler.compile("""
+                gpu fnc good(GpuArray<i32> mut out) => void {
+                  val u64 i = gpu.global_id(0);
+                  out[i] = 1;
+                  return;
+                }
+                """));
     }
 
     @Test
@@ -661,7 +701,7 @@ final class GpuExecutionTest {
                   GpuArray<f32> b,
                   GpuArray<f32> mut out
                 ) => void {
-                  let u64 i = gpu.index;
+                  val u64 i = gpu.index;
                   out[i] = a[i] + b[i];
                   return;
                 }

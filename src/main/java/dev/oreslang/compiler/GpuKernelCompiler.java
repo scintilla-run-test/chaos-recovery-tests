@@ -652,7 +652,159 @@ public final class GpuKernelCompiler {
                             + "use exactly one mutable output buffer, or exactly one buffer parameter");
         }
 
+        validateWorkItemRaceSafety(target);
         return new WorkItemPlan(driver.name(), bufferLengthName(driver.name()));
+    }
+
+    /**
+     * A mutable device buffer may be written by many SIMT work-items only when this pass can
+     * prove that each work-item selects a distinct element. The first conservative contract is
+     * intentionally simple: stores must use gpu.index / gpu.global_id(0), or a val/const alias
+     * of that identity. This rejects local/group IDs, constants, mutable aliases, and hidden
+     * mutable-buffer helper calls until stronger interprocedural/injective-index proofs exist.
+     */
+    private void validateWorkItemRaceSafety(Target target) {
+        LinkedHashSet<String> mutableBuffers = new LinkedHashSet<>();
+        for (Ast.Param param : target.parameters) {
+            if (param.mutable() && isBuffer(resolveAlias(param.type(), target.module))) {
+                mutableBuffers.add(param.name());
+            }
+        }
+        if (mutableBuffers.isEmpty()) return;
+        validateWorkItemStatements(
+                target.module,
+                target.body,
+                new WorkItemIndexScope(null),
+                mutableBuffers);
+    }
+
+    private void validateWorkItemStatements(
+            String module,
+            List<Ast.Stmt> statements,
+            WorkItemIndexScope parent,
+            Set<String> mutableBuffers) {
+        WorkItemIndexScope scope = new WorkItemIndexScope(parent);
+        for (Ast.Stmt stmt : statements) {
+            if (stmt instanceof Ast.BindingStmt binding) {
+                validateWorkItemExpr(module, binding.initializer(), scope, mutableBuffers);
+                if (binding.kind() != Ast.BindingKind.LET
+                        && isUniqueWorkItemIndex(binding.initializer(), scope)) {
+                    scope.defineUnique(binding.name());
+                }
+            } else if (stmt instanceof Ast.ReturnStmt returned) {
+                if (returned.value() != null) {
+                    validateWorkItemExpr(module, returned.value(), scope, mutableBuffers);
+                }
+            } else if (stmt instanceof Ast.ExprStmt expression) {
+                validateWorkItemExpr(module, expression.expression(), scope, mutableBuffers);
+            } else if (stmt instanceof Ast.IfStmt conditional) {
+                for (Ast.IfBranch branch : conditional.branches()) {
+                    validateWorkItemExpr(module, branch.condition(), scope, mutableBuffers);
+                    validateWorkItemStatements(module, branch.body(), scope, mutableBuffers);
+                }
+                validateWorkItemStatements(module, conditional.elseBody(), scope, mutableBuffers);
+            } else if (stmt instanceof Ast.ForStmt loop) {
+                WorkItemIndexScope loopScope = new WorkItemIndexScope(scope);
+                if (loop.initializer() instanceof Ast.BindingStmt binding) {
+                    validateWorkItemExpr(module, binding.initializer(), loopScope, mutableBuffers);
+                    if (binding.kind() != Ast.BindingKind.LET
+                            && isUniqueWorkItemIndex(binding.initializer(), loopScope)) {
+                        loopScope.defineUnique(binding.name());
+                    }
+                } else if (loop.initializer() instanceof Ast.ExprStmt expression) {
+                    validateWorkItemExpr(module, expression.expression(), loopScope, mutableBuffers);
+                }
+                if (loop.condition() != null) {
+                    validateWorkItemExpr(module, loop.condition(), loopScope, mutableBuffers);
+                }
+                if (loop.update() != null) {
+                    validateWorkItemExpr(module, loop.update(), loopScope, mutableBuffers);
+                }
+                validateWorkItemStatements(module, loop.body(), loopScope, mutableBuffers);
+            }
+        }
+    }
+
+    private void validateWorkItemExpr(
+            String module,
+            Ast.Expr expr,
+            WorkItemIndexScope scope,
+            Set<String> mutableBuffers) {
+        if (expr == null || expr instanceof Ast.LiteralExpr
+                || expr instanceof Ast.NameExpr
+                || expr instanceof Ast.GpuIntrinsicExpr) {
+            return;
+        }
+        if (expr instanceof Ast.AssignExpr assignment) {
+            if (assignment.target() instanceof Ast.IndexExpr indexed
+                    && indexed.receiver() instanceof Ast.NameExpr buffer
+                    && mutableBuffers.contains(buffer.name())
+                    && !isUniqueWorkItemIndex(indexed.index(), scope)) {
+                throw new IllegalArgumentException(
+                        "SIMT write to mutable GPU buffer '" + buffer.name()
+                                + "' must be indexed by gpu.index/gpu.global_id(0) or an immutable val/const alias; "
+                                + "the compiler cannot prove this store race-free");
+            }
+            validateWorkItemExpr(module, assignment.target(), scope, mutableBuffers);
+            validateWorkItemExpr(module, assignment.value(), scope, mutableBuffers);
+            return;
+        }
+        if (expr instanceof Ast.BinaryExpr binary) {
+            validateWorkItemExpr(module, binary.left(), scope, mutableBuffers);
+            validateWorkItemExpr(module, binary.right(), scope, mutableBuffers);
+            return;
+        }
+        if (expr instanceof Ast.UnaryExpr unary) {
+            validateWorkItemExpr(module, unary.operand(), scope, mutableBuffers);
+            return;
+        }
+        if (expr instanceof Ast.ConditionalExpr conditional) {
+            validateWorkItemExpr(module, conditional.condition(), scope, mutableBuffers);
+            validateWorkItemExpr(module, conditional.whenTrue(), scope, mutableBuffers);
+            validateWorkItemExpr(module, conditional.whenFalse(), scope, mutableBuffers);
+            return;
+        }
+        if (expr instanceof Ast.CallExpr call) {
+            Target callee = resolveCallTarget(module, call);
+            if (callee != null) {
+                for (int i = 0; i < Math.min(call.arguments().size(), callee.parameters.size()); i++) {
+                    Ast.Expr actual = call.arguments().get(i);
+                    Ast.Param expected = callee.parameters.get(i);
+                    if (expected.mutable()
+                            && actual instanceof Ast.NameExpr name
+                            && mutableBuffers.contains(name.name())
+                            && isBuffer(resolveAlias(expected.type(), callee.module))) {
+                        throw new IllegalArgumentException(
+                                "SIMT kernel cannot pass mutable GPU buffer '" + name.name()
+                                        + "' to gpu helper '" + callee.sourceName
+                                        + "' until interprocedural race-freedom is proven; "
+                                        + "perform the element store in the kernel using gpu.index");
+                    }
+                }
+            }
+            validateWorkItemExpr(module, call.callee(), scope, mutableBuffers);
+            for (Ast.Expr arg : call.arguments()) {
+                validateWorkItemExpr(module, arg, scope, mutableBuffers);
+            }
+            return;
+        }
+        if (expr instanceof Ast.MemberExpr member) {
+            validateWorkItemExpr(module, member.receiver(), scope, mutableBuffers);
+            return;
+        }
+        if (expr instanceof Ast.IndexExpr indexed) {
+            validateWorkItemExpr(module, indexed.receiver(), scope, mutableBuffers);
+            validateWorkItemExpr(module, indexed.index(), scope, mutableBuffers);
+        }
+    }
+
+    private boolean isUniqueWorkItemIndex(Ast.Expr expr, WorkItemIndexScope scope) {
+        if (expr instanceof Ast.GpuIntrinsicExpr intrinsic) {
+            return intrinsic.dimension() == 0
+                    && (intrinsic.intrinsic() == Ast.GpuIntrinsic.INDEX
+                    || intrinsic.intrinsic() == Ast.GpuIntrinsic.GLOBAL_ID);
+        }
+        return expr instanceof Ast.NameExpr name && scope.isUnique(name.name());
     }
 
     private boolean containsWorkItemIntrinsic(List<Ast.Stmt> statements) {
@@ -1723,6 +1875,24 @@ public final class GpuKernelCompiler {
 
     private record KernelEmission(GpuKernel metadata) { }
     private record WorkItemPlan(String driverBuffer, String launchExtentExpression) { }
+
+    private static final class WorkItemIndexScope {
+        private final WorkItemIndexScope parent;
+        private final Set<String> unique = new HashSet<>();
+
+        private WorkItemIndexScope(WorkItemIndexScope parent) {
+            this.parent = parent;
+        }
+
+        private void defineUnique(String name) {
+            unique.add(name);
+        }
+
+        private boolean isUnique(String name) {
+            return unique.contains(name) || (parent != null && parent.isUnique(name));
+        }
+    }
+
     private record ParallelLoop(
             Ast.ForStmt loop,
             String operator,
