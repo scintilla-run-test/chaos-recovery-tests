@@ -1,0 +1,105 @@
+name: Oreslang exact-tree validation
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oreslang-validation-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'feat/validate-oreslang-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - name: Verify exact source tree
+        run: |
+          git rev-parse HEAD
+          git rev-parse HEAD^{tree}
+      - name: Focused actor isolation tests
+        run: mvn -B -ntp -Dtest=ActorCapabilityIsolationTest,SharedPrivateActorIsolationProofTest,PrivateActorIsolationTest test
+      - name: Full Maven verify
+        run: mvn -B -ntp verify
+      - name: Run examples
+        run: |
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/showcase.ores"
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/together.ores"
+          mvn -B -ntp -DskipTests exec:java -Dexec.args="examples/shared-private-actor-isolation.ores"
+
+  native-aot:
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'feat/validate-oreslang-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - run: mvn -B -ntp -Pnative-aot -DskipTests package
+      - run: ./target/ores-aot --mode=aot --platform=linux examples/together.ores
+
+  native-hybrid:
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'feat/validate-oreslang-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - run: mvn -B -ntp -Pnative-hybrid -DskipTests package
+      - run: ./target/ores-hybrid --mode=hybrid --platform=linux examples/together.ores
+
+  polyglot-isolate:
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'feat/validate-oreslang-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          version: '25.3'
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache: maven
+      - run: mvn -B -ntp -Pnative-isolate -DskipTests package
+      - name: Run strict program
+        shell: bash
+        run: |
+          lib="$(find target -maxdepth 1 -type f \( -name 'oresvm.so' -o -name 'liboresvm.so' -o -name 'oresvm.dylib' -o -name 'liboresvm.dylib' \) | head -n1)"
+          test -n "$lib"
+          mvn -B -ntp -Dpolyglot.engine.IsolateLibrary="$PWD/$lib" -DskipTests exec:java -Dexec.args="--strict-isolate --mode=jit --platform=linux examples/together.ores"
