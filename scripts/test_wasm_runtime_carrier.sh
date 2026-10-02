@@ -32,8 +32,8 @@ wcli invoke --tenant tw --deployment r1 --payload '{}' >"$R/wi.json"; jq -e '.ok
 note 'wasmx immutable deployment id'
 body=$(jq -nc --arg w "$(b64 "$R/w2.wasm")" '{tenant_id:"tw",deployment_id:"r1",wasm_base64:$w}'); [[ $(curl -s -o "$R/conflict" -w '%{http_code}' -H "Authorization: Bearer $WT" -H 'content-type: application/json' -d "$body" http://127.0.0.1:8766/v1/deploy) == 409 ]]
 note 'wasmx restart persistence and tamper detection'
-stop_w; start_w; wcli invoke --tenant tw --deployment r1 --payload '{}'|jq -e '.ok and .payload_json.runtime=="wasmx"'>/dev/null
-cp "$R/w2.wasm" "$R/wa/tw/r1/module.wasm"; ! wcli invoke --tenant tw --deployment r1 --payload '{}' >"$R/tamper" 2>"$R/tamper.err"; grep -Eqi 'integrity|manifest|deployment' "$R/tamper.err"
+stop_w; start_w; note 'wasmx restarted'; wcli invoke --tenant tw --deployment r1 --payload '{}' >"$R/wrestart.json" || { cat "$R/wrestart.json" >&2; exit 1; }; cat "$R/wrestart.json"; jq -e '.ok and .payload_json.runtime=="wasmx"' "$R/wrestart.json" >/dev/null
+cp "$R/w2.wasm" "$R/wa/tw/r1/module.wasm"; set +e; wcli invoke --tenant tw --deployment r1 --payload '{}' >"$R/tamper" 2>"$R/tamper.err"; trc=$?; set -e; echo "wasmx tamper cli rc=$trc"; cat "$R/tamper" "$R/tamper.err"; ((trc != 0)); grep -Eqi 'integrity|manifest|deployment' "$R/tamper.err"
 note 'lunatic receipt deploy and actor failure containment'
 lcli deploy --tenant tl --deployment r1 --module "$R/l.wasm" --ores-adapter "$R/la.json" --ores-receipt "$R/lr.json" >"$R/ld.json"; jq -e '.ores_adapter_verified and .ores_receipt_verified' "$R/ld.json">/dev/null
 lcli invoke --tenant tl --deployment r1 --payload '{}' >"$R/li.json"; jq -e '.ok==false and (.error|type=="string")' "$R/li.json">/dev/null
