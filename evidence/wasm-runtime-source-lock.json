@@ -1,0 +1,21 @@
+{
+  "schema_version": "ores.wasm-runtime-carrier.source-lock/v1",
+  "sources": {
+    "wasm-xprs/wasmx-desktop-daemon": "d8999b344ff5fdb703fb037a4dffeeda60baed36",
+    "wasm-xprs/wasmx-desktop-cli": "5179e4db75ec9d4eaebd867860b73296979b88ff",
+    "lunatic-lorry/ll-desktop-daemon": "49a883262728cef5429c570832af9b506ae9279d",
+    "lunatic-lorry/ll-desktop-cli": "99773d6c378a0bf8a112c7c7b8f9520eb3c2b8b8"
+  },
+  "contracts": {
+    "wasm-xprs": {
+      "runtime_contract": "wasm-xprs.lambda-runtime/v1",
+      "target_triple": "wasm32-unknown-unknown",
+      "port": 8766
+    },
+    "lunatic-lorry": {
+      "runtime_contract": "lunatic-lorry.lambda-runtime/v1",
+      "target_triple": "wasm32-wasip1",
+      "port": 8763
+    }
+  }
+}
