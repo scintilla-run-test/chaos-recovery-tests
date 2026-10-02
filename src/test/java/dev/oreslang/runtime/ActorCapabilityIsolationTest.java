@@ -5,6 +5,8 @@ import dev.oreslang.parser.Parser;
 import dev.oreslang.types.TypeChecker;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -184,64 +186,139 @@ final class ActorCapabilityIsolationTest {
         IsolatePolicy developer = IsolatePolicy.developer();
 
         try (ActorRuntime runtime = new ActorRuntime(developer)) {
-            AtomicReference<Throwable> privateSharedMemory = new AtomicReference<>();
-            AtomicReference<Throwable> privateReadonlyShare = new AtomicReference<>();
-            AtomicReference<Throwable> sharedFailure = new AtomicReference<>();
-            CountDownLatch done = new CountDownLatch(2);
+            var privateSharedMemory = runtime.<String>spawnPrivate(
+                    factoryContext -> (message, context) ->
+                            OresContext.requireEffectiveCapability(
+                                    IsolatePolicy.developer(),
+                                    IsolatePolicy.Capability.SHARED_MEMORY,
+                                    "indirect-helper-shared-memory"));
 
-            var isolated = runtime.<String>spawnPrivateTrusted(factoryContext -> (message, context) -> {
-                try {
-                    OresContext.requireEffectiveCapability(
-                            developer,
-                            IsolatePolicy.Capability.SHARED_MEMORY,
-                            "indirect-helper-shared-memory");
-                } catch (Throwable failure) {
-                    privateSharedMemory.set(failure);
-                }
-
-                try {
-                    OresContext.requireEffectiveCapability(
-                            developer,
-                            IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
-                            "indirect-helper-readonly-share");
-                } catch (Throwable failure) {
-                    privateReadonlyShare.set(failure);
-                }
-
-                done.countDown();
-                context.self().stop();
-            });
+            var privateReadonlyShare = runtime.<String>spawnPrivate(
+                    factoryContext -> (message, context) ->
+                            OresContext.requireEffectiveCapability(
+                                    IsolatePolicy.developer(),
+                                    IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
+                                    "indirect-helper-readonly-share"));
 
             var shared = runtime.<String>spawnShared(factoryContext -> (message, context) -> {
-                try {
-                    OresContext.requireEffectiveCapability(
-                            developer,
-                            IsolatePolicy.Capability.SHARED_MEMORY,
-                            "shared-actor-shared-memory");
-                    OresContext.requireEffectiveCapability(
-                            developer,
-                            IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
-                            "shared-actor-readonly-share");
-                } catch (Throwable failure) {
-                    sharedFailure.set(failure);
-                }
-
-                done.countDown();
+                OresContext.requireEffectiveCapability(
+                        IsolatePolicy.developer(),
+                        IsolatePolicy.Capability.SHARED_MEMORY,
+                        "shared-actor-shared-memory");
+                OresContext.requireEffectiveCapability(
+                        IsolatePolicy.developer(),
+                        IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
+                        "shared-actor-readonly-share");
                 context.self().stop();
             });
 
-            isolated.send("check");
+            privateSharedMemory.send("check");
+            privateReadonlyShare.send("check");
             shared.send("check");
 
-            assertTrue(done.await(2, TimeUnit.SECONDS));
-            assertInstanceOf(SecurityException.class, privateSharedMemory.get());
-            assertInstanceOf(SecurityException.class, privateReadonlyShare.get());
-            assertNull(sharedFailure.get());
-
-            assertTrue(isolated.awaitTermination(2, TimeUnit.SECONDS));
+            assertTrue(privateSharedMemory.awaitTermination(2, TimeUnit.SECONDS));
+            assertTrue(privateReadonlyShare.awaitTermination(2, TimeUnit.SECONDS));
             assertTrue(shared.awaitTermination(2, TimeUnit.SECONDS));
-            assertTrue(isolated.failure().isEmpty());
+
+            assertInstanceOf(SecurityException.class, privateSharedMemory.failure().orElseThrow());
+            assertInstanceOf(SecurityException.class, privateReadonlyShare.failure().orElseThrow());
             assertTrue(shared.failure().isEmpty());
         }
     }
+    @Test
+    void privateActorCannotLaunderSharedMemoryThroughFunctionValue() {
+        Ast.Program program = TypeChecker.check(Parser.parse("""
+                fnc build_shared() => void {
+                  val shared = SharedMutex.new(1);
+                  stdio.println(shared);
+                  return;
+                }
+
+                actor PrivateWorker {
+                  pub fnc run() => void {
+                    val callback = build_shared;
+                    callback();
+                    return;
+                  }
+                }
+                """));
+
+        SecurityException error = assertThrows(
+                SecurityException.class,
+                () -> CapabilityChecker.check(program, IsolatePolicy.developer()));
+
+        assertTrue(error.getMessage().contains("SHARED_MEMORY"));
+    }
+
+    @Test
+    void privateActorCannotLaunderReadonlyShareThroughQualifiedFunctionValue() {
+        Ast.Program program = TypeChecker.check(Parser.parse("""
+                define module helpers
+                  pub fnc expose() => void {
+                    val shared = process.share_readonly(arr[1, 2, 3]);
+                    stdio.println(shared);
+                    return;
+                  }
+                end
+
+                actor PrivateWorker {
+                  pub fnc run() => void {
+                    val callback = helpers.expose;
+                    callback();
+                    return;
+                  }
+                }
+                """));
+
+        SecurityException error = assertThrows(
+                SecurityException.class,
+                () -> CapabilityChecker.check(program, IsolatePolicy.developer()));
+
+        assertTrue(error.getMessage().contains("ACTOR_SHARE_READONLY"));
+    }
+
+
+    @Test
+    void privateActorCannotLaunderSharedMemoryThroughStaticMethodValue() {
+        Ast.Program program = TypeChecker.check(Parser.parse("""
+                define class Helpers
+                  pub static fnc build_shared() => void {
+                    val shared = SharedMutex.new(1);
+                    stdio.println(shared);
+                    return;
+                  }
+                end
+
+                actor PrivateWorker {
+                  pub fnc run() => void {
+                    val callback = Helpers.build_shared;
+                    callback();
+                    return;
+                  }
+                }
+                """));
+
+        SecurityException error = assertThrows(
+                SecurityException.class,
+                () -> CapabilityChecker.check(program, IsolatePolicy.developer()));
+
+        assertTrue(error.getMessage().contains("SHARED_MEMORY"));
+    }
+
+
+    @Test
+    void invalidOreslangPrivateActorSharingFixtureIsRejected() throws Exception {
+        String source = Files.readString(Path.of("examples/private-actor-sharing-invalid.ores"));
+        Ast.Program program = TypeChecker.check(Parser.parse(source));
+
+        SecurityException error = assertThrows(
+                SecurityException.class,
+                () -> CapabilityChecker.check(program, IsolatePolicy.developer()));
+
+        assertTrue(
+                error.getMessage().contains("SHARED_MEMORY")
+                        || error.getMessage().contains("ACTOR_SHARE_READONLY"));
+    }
+
+
 }
