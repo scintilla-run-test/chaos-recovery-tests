@@ -1,0 +1,154 @@
+name: WASM runtime carrier
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/test_wasm_runtime_carrier.sh'
+      - 'evidence/wasm-runtime-source-lock.json'
+      - '.github/workflows/wasm-runtime-carrier.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wasm-runtime-carrier-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upstream-daemons:
+    name: upstream daemon / ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: wasmx
+            repository: wasm-xprs/wasmx-desktop-daemon
+            ref: d8999b344ff5fdb703fb037a4dffeeda60baed36
+            rust: '1.96'
+          - name: lunatic
+            repository: lunatic-lorry/ll-desktop-daemon
+            ref: 49a883262728cef5429c570832af9b506ae9279d
+            rust: '1.90'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.ref }}
+          path: upstream
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --manifest-path upstream/Cargo.toml -- --check
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path upstream/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Full daemon suite
+        run: cargo test --manifest-path upstream/Cargo.toml --locked --all-targets -- --nocapture
+
+  upstream-clis:
+    name: upstream CLI / ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: wasmx
+            repository: wasm-xprs/wasmx-desktop-cli
+            ref: 5179e4db75ec9d4eaebd867860b73296979b88ff
+          - name: lunatic
+            repository: lunatic-lorry/ll-desktop-cli
+            ref: 99773d6c378a0bf8a112c7c7b8f9520eb3c2b8b8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.ref }}
+          path: upstream
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: '1.90'
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --manifest-path upstream/Cargo.toml -- --check
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path upstream/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Full CLI suite
+        run: cargo test --manifest-path upstream/Cargo.toml --locked --all-targets -- --nocapture
+
+  black-box:
+    name: cross-runtime black-box carrier
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout carrier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout wasm-xprs daemon
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: wasm-xprs/wasmx-desktop-daemon
+          ref: d8999b344ff5fdb703fb037a4dffeeda60baed36
+          path: upstream/wasmx-daemon
+          persist-credentials: false
+      - name: Checkout wasm-xprs CLI
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: wasm-xprs/wasmx-desktop-cli
+          ref: 5179e4db75ec9d4eaebd867860b73296979b88ff
+          path: upstream/wasmx-cli
+          persist-credentials: false
+      - name: Checkout Lunatic daemon
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: lunatic-lorry/ll-desktop-daemon
+          ref: 49a883262728cef5429c570832af9b506ae9279d
+          path: upstream/ll-daemon
+          persist-credentials: false
+      - name: Checkout Lunatic CLI
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: lunatic-lorry/ll-desktop-cli
+          ref: 99773d6c378a0bf8a112c7c7b8f9520eb3c2b8b8
+          path: upstream/ll-cli
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: '1.96'
+      - name: Verify pinned source lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.schema_version == "ores.wasm-runtime-carrier.source-lock/v1"' evidence/wasm-runtime-source-lock.json >/dev/null
+          jq -er '.sources | to_entries | all(.value | test("^[0-9a-f]{40}$"))' evidence/wasm-runtime-source-lock.json >/dev/null
+          jq -e '.contracts["wasm-xprs"].port == 8766 and .contracts["lunatic-lorry"].port == 8763' evidence/wasm-runtime-source-lock.json >/dev/null
+          test "$(git -C upstream/wasmx-daemon rev-parse HEAD)" = "$(jq -r '.sources["wasm-xprs/wasmx-desktop-daemon"]' evidence/wasm-runtime-source-lock.json)"
+          test "$(git -C upstream/wasmx-cli rev-parse HEAD)" = "$(jq -r '.sources["wasm-xprs/wasmx-desktop-cli"]' evidence/wasm-runtime-source-lock.json)"
+          test "$(git -C upstream/ll-daemon rev-parse HEAD)" = "$(jq -r '.sources["lunatic-lorry/ll-desktop-daemon"]' evidence/wasm-runtime-source-lock.json)"
+          test "$(git -C upstream/ll-cli rev-parse HEAD)" = "$(jq -r '.sources["lunatic-lorry/ll-desktop-cli"]' evidence/wasm-runtime-source-lock.json)"
+      - name: Build pinned public daemons and CLIs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path upstream/wasmx-daemon/Cargo.toml --locked --bin wasmx-desktop-daemon
+          cargo build --manifest-path upstream/wasmx-cli/Cargo.toml --locked --bin wasmx-desktop-cli
+          cargo build --manifest-path upstream/ll-daemon/Cargo.toml --locked --bin ll-desktop-daemon
+          cargo build --manifest-path upstream/ll-cli/Cargo.toml --locked --bin ll-desktop-cli
+      - name: Run cross-runtime deploy/invoke/provenance/restart/tamper carrier
+        shell: bash
+        env:
+          WASMX_DAEMON_BIN: ${{ github.workspace }}/upstream/wasmx-daemon/target/debug/wasmx-desktop-daemon
+          WASMX_CLI_BIN: ${{ github.workspace }}/upstream/wasmx-cli/target/debug/wasmx-desktop-cli
+          WASMX_CLI_CONFIG: ${{ github.workspace }}/upstream/wasmx-cli/.cli-flags.toml
+          LL_DAEMON_BIN: ${{ github.workspace }}/upstream/ll-daemon/target/debug/ll-desktop-daemon
+          LL_CLI_BIN: ${{ github.workspace }}/upstream/ll-cli/target/debug/ll-desktop-cli
+          LL_DAEMON_CONFIG: ${{ github.workspace }}/upstream/ll-daemon/.cli-flags.toml
+          LL_CLI_CONFIG: ${{ github.workspace }}/upstream/ll-cli/.cli-flags.toml
+        run: bash scripts/test_wasm_runtime_carrier.sh
