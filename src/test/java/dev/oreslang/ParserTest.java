@@ -107,14 +107,14 @@ final class ParserTest {
     }
 
     @Test
-    void actorFncDefaultsSharedAndIsoactorIsPrivate() {
-        Ast.Program sharedProgram = Parser.parse("""
+    void actorFncDefaultsPrivateSharedIsExplicitAndIsoactorIsPrivate() {
+        Ast.Program privateByDefaultProgram = Parser.parse("""
                 pub actor fnc worker(int value) => int {
                   return value;
                 }
                 """);
-        Ast.FunctionDecl sharedActor = (Ast.FunctionDecl) sharedProgram.modules().getFirst().declarations().getFirst();
-        assertEquals(Ast.ActorKind.SHARED, sharedActor.actorKind());
+        Ast.FunctionDecl privateByDefault = (Ast.FunctionDecl) privateByDefaultProgram.modules().getFirst().declarations().getFirst();
+        assertEquals(Ast.ActorKind.PRIVATE, privateByDefault.actorKind());
 
         Ast.Program explicitSharedProgram = Parser.parse("""
                 pub shared actor fnc worker(int value) => int {

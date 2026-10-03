@@ -816,6 +816,10 @@ public final class OresEvalRootNode extends RootNode {
             if (receiver instanceof NativeValues.DynamicStructValue dynamic) return dynamic.getString(name);
             if (receiver instanceof NativeValues.RecordValue record) return record.getString(name);
             if (receiver instanceof NativeValues.StructValue struct) return struct.getString(name);
+            if (receiver instanceof Map<?, ?> map) {
+                if (!map.containsKey(name)) throw new IllegalArgumentException("unknown map member " + name);
+                return map.get(name);
+            }
             InteropLibrary foreign = InteropLibrary.getUncached(receiver);
             if (foreign.hasMembers(receiver)) {
                 context.requireCapability(IsolatePolicy.Capability.JAVA_INTEROP,

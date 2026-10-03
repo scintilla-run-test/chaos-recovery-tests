@@ -988,8 +988,11 @@ public final class TypeChecker {
             boolean dynamicKeys = false;
             Type dynamicValue = null;
             for (Ast.ObjectField field : object.fields()) {
-                Type valueType = widenCollectionElement(typeOf(field.value(), env, generics, self));
-                dynamicValue = dynamicValue == null ? valueType : collectionElementJoin(dynamicValue, valueType);
+                Type valueType = typeOf(field.value(), env, generics, self);
+                Type dynamicElementType = widenCollectionElement(valueType);
+                dynamicValue = dynamicValue == null
+                        ? dynamicElementType
+                        : collectionElementJoin(dynamicValue, dynamicElementType);
                 if (field.isDynamic()) {
                     dynamicKeys = true;
                     requireAssignable(
