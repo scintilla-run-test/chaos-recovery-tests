@@ -1,0 +1,142 @@
+name: Oreslang demos end-to-end
+
+on:
+  push:
+    branches:
+      - test/oreslang-demos-c3e3abe
+
+permissions:
+  contents: read
+
+jobs:
+  demos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout local compiler mirror
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Build Oreslang compiler mirror
+        run: |
+          mvn -B -DskipTests package dependency:build-classpath -Dmdep.outputFile=target/classpath.txt
+
+      - name: Create local oreslang-compiler launcher
+        run: |
+          cat > /tmp/oreslang-compiler <<'EOF'
+          #!/usr/bin/env sh
+          set -eu
+          root="${ORESLANG_MIRROR_ROOT}"
+          cp="${root}/target/classes:$(cat "${root}/target/classpath.txt")"
+          exec java -cp "${cp}" dev.oreslang.launcher.OresMain "$@"
+          EOF
+          chmod +x /tmp/oreslang-compiler
+          echo "ORESLANG_MIRROR_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+      - name: Checkout demos PR branch
+        uses: actions/checkout@v4
+        with:
+          repository: ores-truffle-oreslang/oreslang-demos
+          ref: feat/working-cli-desktop-web-demos
+          path: demos
+
+      - name: Test CLI demo end-to-end
+        env:
+          ORESLANG_COMPILER: /tmp/oreslang-compiler
+        run: |
+          cd demos/cli
+          output="$(sh run.sh)"
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" | grep -F "Oreslang CLI demo"
+          printf '%s\n' "$output" | grep -F "19 + 23 ="
+          printf '%s\n' "$output" | grep -Fx "42"
+
+      - name: Test desktop Oreslang guest
+        env:
+          ORESLANG_COMPILER: /tmp/oreslang-compiler
+        run: |
+          cd demos/desktop-app
+          /tmp/oreslang-compiler --platform=linux app.ores | tee /tmp/desktop-guest.out
+          grep -F "Oreslang Desktop Demo" /tmp/desktop-guest.out
+          grep -F "output produced by an Oreslang program" /tmp/desktop-guest.out
+
+      - name: Compile desktop host
+        run: |
+          cd demos/desktop-app
+          javac DesktopLauncher.java
+
+      - name: Test desktop host end-to-end under Xvfb
+        env:
+          ORESLANG_COMPILER: /tmp/oreslang-compiler
+        run: |
+          cd demos/desktop-app
+          set +e
+          timeout 8s xvfb-run -a java -cp . DesktopLauncher >/tmp/desktop-host.out 2>/tmp/desktop-host.err
+          status=$?
+          set -e
+          cat /tmp/desktop-host.out || true
+          cat /tmp/desktop-host.err >&2 || true
+          if [ "$status" -ne 124 ]; then
+            echo "Desktop host exited before timeout; expected a healthy window to remain open." >&2
+            exit 1
+          fi
+
+      - name: Test web Oreslang guests
+        env:
+          ORESLANG_COMPILER: /tmp/oreslang-compiler
+        run: |
+          cd demos/web-server
+          /tmp/oreslang-compiler --platform=server index.ores | tee /tmp/web-index.out
+          /tmp/oreslang-compiler --platform=server health.ores | tee /tmp/web-health.out
+          grep -F "Oreslang Web Demo" /tmp/web-index.out
+          grep -F '"status":"ok"' /tmp/web-health.out
+
+      - name: Compile web host
+        run: |
+          cd demos/web-server
+          javac WebServer.java
+
+      - name: Test web server end-to-end
+        env:
+          ORESLANG_COMPILER: /tmp/oreslang-compiler
+          PORT: "18080"
+        run: |
+          cd demos/web-server
+          java -cp . WebServer >/tmp/web-server.out 2>/tmp/web-server.err &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+
+          ready=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/health >/tmp/health.json; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$ready" -ne 1 ]; then
+            cat /tmp/web-server.out || true
+            cat /tmp/web-server.err >&2 || true
+            exit 1
+          fi
+
+          curl -fsS http://127.0.0.1:18080/ >/tmp/index.html
+          grep -F "Oreslang Web Demo" /tmp/index.html
+          grep -F '"status":"ok"' /tmp/health.json
+          grep -F '"language":"oreslang"' /tmp/health.json
+
+          code404="$(curl -sS -o /tmp/not-found.txt -w '%{http_code}' http://127.0.0.1:18080/missing)"
+          test "$code404" = "404"
+
+          code405="$(curl -sS -X POST -o /tmp/method.txt -w '%{http_code}' http://127.0.0.1:18080/health)"
+          test "$code405" = "405"
+
+          cat /tmp/web-server.out || true
+          cat /tmp/web-server.err >&2 || true
