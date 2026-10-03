@@ -8,6 +8,8 @@ import dev.oreslang.types.OwnershipChecker;
 import dev.oreslang.types.TypeChecker;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 final class ParserTest {
@@ -363,6 +365,96 @@ final class ParserTest {
                   }
                 end
                 """));
+    }
+
+    @Test
+    void stopDoAndDoneAreReservedButMayNameCallables() {
+        var tokens = new Lexer("stop do done").scan();
+        assertEquals(Token.Type.STOP, tokens.get(0).type());
+        assertEquals(Token.Type.DO, tokens.get(1).type());
+        assertEquals(Token.Type.DONE, tokens.get(2).type());
+
+        assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
+                define module app
+                  fnc stop() => int { return 1; }
+                  fnc do() => int { return 2; }
+                  routine done() => int { return 3; }
+
+                  fnc total() => int {
+                    return stop() + do() + done();
+                  }
+                end
+                """)));
+
+        assertDoesNotThrow(() -> Parser.parse("""
+                import fnc {stop, do, done} from './flow';
+
+                define module app
+                  fnc main() => void { return; }
+                end
+                """));
+
+        assertDoesNotThrow(() -> Parser.parse("""
+                define class Flow as
+                  pub stop() => int { return 1; }
+                  pub do() => int { return 2; }
+                  pub done() => int { return 3; }
+                end
+
+                define interface FlowApi
+                  fnc stop() => int;
+                  fnc do() => int;
+                  fnc done() => int;
+                end
+                """));
+    }
+
+    @Test
+    void stopDoAndDoneCannotBeUsedAsOrdinaryIdentifiers() {
+        for (String keyword : List.of("stop", "do", "done")) {
+            assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                    define module app
+                      fnc main() => void {
+                        val %s = 1;
+                        return;
+                      }
+                    end
+                    """.formatted(keyword)));
+
+            assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                    define module app
+                      fnc take(int %s) => void { return; }
+                    end
+                    """.formatted(keyword)));
+
+            assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                    define class %s as
+                    end
+                    """.formatted(keyword)));
+
+            assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                    define module app
+                      fnc %s() => int { return 1; }
+                      fnc main() => void {
+                        val callback = %s;
+                        return;
+                      }
+                    end
+                    """.formatted(keyword, keyword)));
+
+            assertThrows(IllegalArgumentException.class, () -> Parser.parse("""
+                    define class Flow as
+                      pub %s() => int { return 1; }
+                    end
+                    define module app
+                      fnc main() => void {
+                        val flow = new Flow();
+                        val callback = flow.%s;
+                        return;
+                      }
+                    end
+                    """.formatted(keyword, keyword)));
+        }
     }
 
     @Test
