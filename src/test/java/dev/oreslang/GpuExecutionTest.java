@@ -720,7 +720,9 @@ final class GpuExecutionTest {
                           return;
                         }
                         """));
-        assertTrue(shadowed.getMessage().contains("cannot prove this store race-free"));
+        assertTrue(
+                shadowed.getMessage().contains("cannot prove this store race-free"),
+                () -> "unexpected shadowing diagnostic: " + shadowed.getMessage());
     }
 
     @Test
