@@ -1,0 +1,48 @@
+name: oreslang-demos-smoke
+
+on:
+  push:
+    branches:
+      - "feat/oreslang-demos-pr1-*"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Build mirrored Oreslang compiler
+        run: |
+          mvn -q -DskipTests package
+          mvn -q dependency:build-classpath -Dmdep.outputFile=target/classpath.txt
+
+      - name: Stitch and run CLI demo
+        run: |
+          cat demo-smoke/cli/math.ores demo-smoke/cli/messages.ores demo-smoke/cli/main.ores > target/cli-demo.ores
+          java -cp "target/classes:$(cat target/classpath.txt)" dev.oreslang.launcher.OresMain --platform=server target/cli-demo.ores | tee target/cli-demo.out
+          grep -Fx "Oreslang CLI demo" target/cli-demo.out
+          grep -Fx "42" target/cli-demo.out
+
+      - name: Stitch and run web application manifest
+        run: |
+          cat demo-smoke/web/index.ores demo-smoke/web/health.ores demo-smoke/web/WebServer.ores > target/web-demo.ores
+          java -cp "target/classes:$(cat target/classpath.txt)" dev.oreslang.launcher.OresMain --platform=server target/web-demo.ores | tee target/web-demo.out
+          grep -Fx "/" target/web-demo.out
+          grep -Fx "/health" target/web-demo.out
+          grep -F '"status":"ok"' target/web-demo.out
+
+      - name: Stitch and run desktop application manifest
+        run: |
+          cat demo-smoke/desktop/title.ores demo-smoke/desktop/body.ores demo-smoke/desktop/window.ores demo-smoke/desktop/DesktopApp.ores > target/desktop-demo.ores
+          java -cp "target/classes:$(cat target/classpath.txt)" dev.oreslang.launcher.OresMain --platform=linux target/desktop-demo.ores | tee target/desktop-demo.out
+          grep -Fx "Oreslang Desktop Demo" target/desktop-demo.out
+          grep -Fx "640" target/desktop-demo.out
+          grep -Fx "360" target/desktop-demo.out

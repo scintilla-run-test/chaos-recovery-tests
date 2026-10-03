@@ -1,0 +1,7 @@
+pub routine main() => void {
+  stdio.println(desktop_title.value());
+  stdio.println(desktop_window.width());
+  stdio.println(desktop_window.height());
+  stdio.println(desktop_body.value());
+  return;
+}

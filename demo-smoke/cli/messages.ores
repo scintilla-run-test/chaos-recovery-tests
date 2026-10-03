@@ -1,0 +1,9 @@
+define module demo_messages
+  pub fnc title() => string {
+    return "Oreslang CLI demo";
+  }
+
+  pub fnc equation() => string {
+    return "19 + 23 =";
+  }
+end

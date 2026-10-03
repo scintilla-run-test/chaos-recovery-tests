@@ -1,0 +1,9 @@
+define module desktop_window
+  pub fnc width() => int {
+    return 640;
+  }
+
+  pub fnc height() => int {
+    return 360;
+  }
+end

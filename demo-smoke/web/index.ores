@@ -1,0 +1,5 @@
+define module web_index
+  pub fnc body() => string {
+    return "<!doctype html><html><head><meta charset=utf-8><title>Oreslang Web Demo</title></head><body><h1>Oreslang Web Demo</h1><p>This route and response body are defined by Oreslang.</p></body></html>";
+  }
+end
