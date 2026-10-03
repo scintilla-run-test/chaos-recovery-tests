@@ -1,0 +1,10 @@
+pub routine main() => void {
+  stdio.println("/");
+  stdio.println("text/html; charset=utf-8");
+  stdio.println(web_index.body());
+
+  stdio.println("/health");
+  stdio.println("application/json; charset=utf-8");
+  stdio.println(web_health.body());
+  return;
+}
