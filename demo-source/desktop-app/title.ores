@@ -1,0 +1,5 @@
+define module desktop_title
+  pub fnc value() => string {
+    return "Oreslang Desktop Demo";
+  }
+end
