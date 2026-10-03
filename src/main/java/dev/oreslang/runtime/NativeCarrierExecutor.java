@@ -11,6 +11,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 
 /**
  * Bounded actor-carrier executor backed by native OS threads.
@@ -44,6 +45,7 @@ public final class NativeCarrierExecutor {
     private final AtomicInteger largestPoolSize;
     private final AtomicInteger activeCount = new AtomicInteger();
     private final AtomicLong completedTaskCount = new AtomicLong();
+    private final AtomicReferenceArray<Thread> carrierThreads;
     private final AtomicBoolean shutdown = new AtomicBoolean();
     private final long nativeHandle;
 
@@ -61,6 +63,7 @@ public final class NativeCarrierExecutor {
 
         this.queue = new ArrayBlockingQueue<>(queueCapacity, true);
         this.maximumPoolSize = maximumPoolSize;
+        this.carrierThreads = new AtomicReferenceArray<>(maximumPoolSize);
         this.corePoolSize = new AtomicInteger(corePoolSize);
         this.largestPoolSize = new AtomicInteger(corePoolSize);
 
@@ -107,6 +110,7 @@ public final class NativeCarrierExecutor {
         CURRENT_EXECUTOR.set(this);
         CURRENT_SLOT.set(slot);
         CURRENT_NATIVE_THREAD_ID.set(nativeCurrentThreadId());
+        carrierThreads.set(slot, Thread.currentThread());
         try {
             while (!shutdown.get()) {
                 nativeAwaitEnabled(nativeHandle, slot);
@@ -142,6 +146,7 @@ public final class NativeCarrierExecutor {
                 }
             }
         } finally {
+            carrierThreads.set(slot, null);
             CURRENT_NATIVE_THREAD_ID.remove();
             CURRENT_SLOT.remove();
             CURRENT_EXECUTOR.remove();
@@ -183,6 +188,16 @@ public final class NativeCarrierExecutor {
         if (!shutdown.compareAndSet(false, true)) return List.of();
         ArrayList<Runnable> abandoned = new ArrayList<>();
         queue.drainTo(abandoned);
+
+        // Match ThreadPoolExecutor.shutdownNow(): signal any active carrier
+        // before the native side joins pthreads. This is cooperative (Java
+        // interruption), not unsafe pthread cancellation; uncooperative actor
+        // containment remains the runtime watchdog's responsibility.
+        for (int slot = 0; slot < carrierThreads.length(); slot++) {
+            Thread carrier = carrierThreads.get(slot);
+            if (carrier != null) carrier.interrupt();
+        }
+
         nativeShutdown(nativeHandle);
         return List.copyOf(abandoned);
     }
