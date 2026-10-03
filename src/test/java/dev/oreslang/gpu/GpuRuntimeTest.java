@@ -24,6 +24,16 @@ final class GpuRuntimeTest {
     }
 
     @Test
+    void residentTransfersNeverFallBackWithoutABackend() {
+        GpuRuntime runtime = new GpuRuntime();
+
+        GpuRuntime.GpuUnavailableException upload = assertThrows(
+                GpuRuntime.GpuUnavailableException.class,
+                () -> runtime.uploadArray(List.of(1L, 2L, 3L)));
+        assertTrue(upload.getMessage().contains("CPU fallback is forbidden"));
+    }
+
+    @Test
     void freezesGuestCollectionsBeforeBackendInvocation() {
         ArrayList<Object> nested = new ArrayList<>();
         nested.add(7L);
