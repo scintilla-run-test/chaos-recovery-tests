@@ -29,7 +29,8 @@ public final class OresContext implements AutoCloseable {
     private final IsolatePolicy isolatePolicy;
     private final ExecutionProfile executionProfile;
     private final ReentrantLock adversarialActorTurnLock = new ReentrantLock(true);
-    private final Map<String, Object> linkedCodeUnits = new HashMap<>();\n    private final Set<AutoCloseable> nativeResources = ConcurrentHashMap.newKeySet();
+    private final Map<String, Object> linkedCodeUnits = new HashMap<>();
+    private final Set<AutoCloseable> nativeResources = ConcurrentHashMap.newKeySet();
 
     public OresContext(OresLanguage language, TruffleLanguage.Env env) {
         this.language = language;
