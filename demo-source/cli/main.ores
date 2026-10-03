@@ -1,0 +1,10 @@
+pub routine main() => void {
+  const left = 19;
+  const right = 23;
+  val answer = demo_math.add(left, right);
+
+  stdio.println(demo_messages.title());
+  stdio.println(demo_messages.equation());
+  stdio.println(answer);
+  return;
+}
