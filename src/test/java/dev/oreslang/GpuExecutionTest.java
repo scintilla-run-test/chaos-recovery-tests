@@ -713,10 +713,10 @@ final class GpuExecutionTest {
                 () -> OresCompiler.compile("""
                         gpu fnc bad(GpuArray<i32> mut out) => void {
                           val u64 i = gpu.index;
-                          if (true) {
+                          if true do
                             let u64 i = 0;
                             out[i] = 1;
-                          }
+                          fi
                           return;
                         }
                         """));
