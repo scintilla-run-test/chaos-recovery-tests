@@ -644,7 +644,6 @@ public final class OresEvalRootNode extends RootNode {
                         try {
                             OresThread.sleep(number.longValue());
                         } catch (InterruptedException interrupted) {
-                            java.lang.Thread.currentThread().interrupt();
                             throw new java.util.concurrent.CancellationException("Thread.sleep interrupted");
                         }
                         return null;
@@ -669,7 +668,6 @@ public final class OresEvalRootNode extends RootNode {
                         try {
                             thread.join();
                         } catch (InterruptedException interrupted) {
-                            java.lang.Thread.currentThread().interrupt();
                             throw new java.util.concurrent.CancellationException("Thread.join interrupted");
                         }
                         return null;
