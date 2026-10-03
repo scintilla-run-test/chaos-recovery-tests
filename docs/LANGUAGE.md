@@ -1008,4 +1008,30 @@ The same compiled program can target a secondary multi-threaded runtime because:
 - closures cannot smuggle an outstanding stack borrow into a longer-lived task;
 - actor messages continue to cross actor boundaries only through the existing frozen/sendable contract.
 
-When explicit thread/task spawning is added, cross-thread transfer will require move semantics and a `Send`-equivalent capability; shared cross-thread references will additionally require a `Sync`-equivalent guarantee. Those marker traits are intentionally a future surface feature—the current source language has no ambient raw-thread API, so there is no unchecked escape hatch to bypass ownership.
+Oreslang now exposes a deliberately privileged `Thread` surface for Java-style platform-thread interop. It is **not** the actor scheduler: actors remain logical mailbox owners multiplexed over bounded native carriers. A `Thread` instead owns one dedicated OS thread and requires the host-granted `THREAD_CREATE` capability.
+
+The target must currently be an inline, zero-argument `nlex` lambda so activation-local state cannot silently become shared mutable state across OS threads:
+
+```ores
+pub routine main() => void {
+  val Thread worker = new Thread(nlex || -> {
+    stdio.stdout.write("worker");
+    return;
+  }, "worker-1");
+
+  worker.start();
+  worker.join();
+  return;
+}
+```
+
+The initial Java-shaped surface includes `start()`, `join()`, `interrupt()`, `isAlive()`, `isInterrupted()`, `getName()`, `setName()`, `threadId()`, `getState()`, `isVirtual()`, plus `Thread.currentThread()`, `Thread.interrupted()`, `Thread.sleep(ms)`, and `Thread.yield()`.
+
+Important boundaries:
+
+- actors cannot construct or control dedicated `Thread` instances; they must use actor spawning/mailboxes;
+- `Thread.currentThread()` never exposes an actor/root carrier;
+- `Thread.sleep()` and `Thread.yield()` are valid only on a dedicated `Thread`, so user code cannot park a shared actor carrier;
+- explicit threads are process-bounded by the runtime even in trusted mode;
+- the current implementation is a platform-thread API (`isVirtual() == false`), not a Java virtual-thread emulation;
+- broader cross-thread transfer will still require first-class `Send`/`Sync`-equivalent marker semantics before arbitrary move-only values can cross this boundary.
