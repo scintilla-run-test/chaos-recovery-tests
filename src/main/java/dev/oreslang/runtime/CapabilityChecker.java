@@ -1,6 +1,7 @@
 package dev.oreslang.runtime;
 
 import dev.oreslang.ast.Ast;
+import dev.oreslang.imports.ImportRules;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -23,6 +24,7 @@ public final class CapabilityChecker {
     private final Set<String> ambiguousAliases = new HashSet<>();
     private final Set<String> ambiguousClasses = new HashSet<>();
     private final Set<String> ambiguousFunctions = new HashSet<>();
+    private final Map<String, String> javaImports = new HashMap<>();
     private final Set<Ast.FunctionDecl> callableStack =
             java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
     private final Set<Ast.MethodDecl> methodStack =
@@ -31,6 +33,15 @@ public final class CapabilityChecker {
             java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
 
     private CapabilityChecker(Ast.Program program) {
+        for (Ast.ImportDecl imported : program.imports()) {
+            ImportRules.validate(imported);
+            if (!ImportRules.isJavaPath(imported.path())) continue;
+            String className = ImportRules.javaClassName(imported.path());
+            for (String binding : ImportRules.exposedBindings(imported)) {
+                javaImports.put(binding, className);
+            }
+        }
+
         for (Ast.ModuleDecl module : program.modules()) {
             for (Ast.Decl declaration : module.declarations()) {
                 if (declaration instanceof Ast.TypeAliasDecl alias) {
@@ -135,6 +146,13 @@ public final class CapabilityChecker {
     }
 
     private void checkProgram(Ast.Program program, IsolatePolicy policy) {
+        for (Ast.ImportDecl imported : program.imports()) {
+            if (ImportRules.isJavaPath(imported.path())) {
+                require(policy, IsolatePolicy.Capability.JAVA_INTEROP,
+                        "Java host import " + ImportRules.javaClassName(imported.path()));
+            }
+        }
+
         for (Ast.ModuleDecl module : program.modules()) {
             for (Ast.Decl declaration : module.declarations()) {
                 if (declaration instanceof Ast.FunctionDecl fn) {
@@ -180,16 +198,12 @@ public final class CapabilityChecker {
     }
 
     private static IsolatePolicy actorPolicy(Ast.ActorKind kind, IsolatePolicy parent) {
-        return switch (kind) {
-            case PRIVATE -> parent.withoutCapabilities(
-                    IsolatePolicy.Capability.SHARED_MEMORY,
-                    IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
-                    IsolatePolicy.Capability.THREAD_CREATE);
-            case SHARED -> parent.withoutCapabilities(
-                    IsolatePolicy.Capability.THREAD_CREATE);
-            case UNTRUSTED -> IsolatePolicy.untrustedActor();
-            default -> parent;
-        };
+        if (kind != Ast.ActorKind.PRIVATE) return parent;
+        return parent.withoutCapabilities(
+                IsolatePolicy.Capability.SHARED_MEMORY,
+                IsolatePolicy.Capability.ACTOR_SHARE_READONLY,
+                IsolatePolicy.Capability.JAVA_INTEROP,
+                IsolatePolicy.Capability.JAVA_SOURCE_INTEROP);
     }
 
     private void checkCallableTypes(
@@ -206,8 +220,9 @@ public final class CapabilityChecker {
         if (type.name().equals("SharedMutex")) {
             require(policy, IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex<T>");
         }
-        if (type.name().equals("Thread")) {
-            require(policy, IsolatePolicy.Capability.THREAD_CREATE, "Thread");
+        String javaClass = javaImports.get(type.name());
+        if (javaClass != null) {
+            require(policy, IsolatePolicy.Capability.JAVA_INTEROP, "Java host import " + javaClass);
         }
         for (Ast.TypeRef argument : type.arguments()) checkType(argument, policy);
         if (type.isBorrow()) checkType(type.borrowedTarget(), policy);
@@ -279,12 +294,17 @@ public final class CapabilityChecker {
     }
 
     private void checkExpr(Ast.Expr expr, IsolatePolicy policy) {
+        if (expr instanceof Ast.NameExpr javaName) {
+            String javaClass = javaImports.get(javaName.name());
+            if (javaClass != null) {
+                require(policy, IsolatePolicy.Capability.JAVA_INTEROP, "Java host import " + javaClass);
+            }
+        }
+
         if (expr instanceof Ast.NameExpr n && n.name().equals("print")) {
             require(policy, IsolatePolicy.Capability.STDOUT, "print");
         } else if (expr instanceof Ast.NameExpr n && n.name().equals("SharedMutex")) {
             require(policy, IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex");
-        } else if (expr instanceof Ast.NameExpr n && n.name().equals("Thread")) {
-            require(policy, IsolatePolicy.Capability.THREAD_CREATE, "Thread");
         } else if (expr instanceof Ast.NameExpr n) {
             // Function values can be laundered through locals/callbacks before
             // invocation. Check the referenced body at the point the function
@@ -322,9 +342,7 @@ public final class CapabilityChecker {
                 if (path.startsWith("env.")) require(policy, IsolatePolicy.Capability.ENVIRONMENT, path);
                 if (path.startsWith("ffi.")) require(policy, IsolatePolicy.Capability.FFI, path);
                 if (path.startsWith("polyglot.")) require(policy, IsolatePolicy.Capability.POLYGLOT, path);
-                if (path.startsWith("thread.") || path.startsWith("Thread.")) {
-                    require(policy, IsolatePolicy.Capability.THREAD_CREATE, path);
-                }
+                if (path.startsWith("thread.")) require(policy, IsolatePolicy.Capability.THREAD_CREATE, path);
                 if (path.startsWith("process.spawn")) require(policy, IsolatePolicy.Capability.CHILD_PROCESS, path);
             }
             checkExpr(m.receiver(), policy);

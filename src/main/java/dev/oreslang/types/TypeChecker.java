@@ -1,6 +1,7 @@
 package dev.oreslang.types;
 
 import dev.oreslang.ast.Ast;
+import dev.oreslang.imports.ImportRules;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.types.Types.Function;
 import dev.oreslang.types.Types.Borrow;
@@ -61,17 +62,32 @@ public final class TypeChecker {
 
     private void validateImports(Ast.Program program) {
         Set<String> exposed = new HashSet<>();
+        Set<String> localNames = new HashSet<>(Set.of(
+                "stdio", "process", "actor", "print", "Some", "None", "Ok", "Err",
+                "Mutex", "SharedMutex", "Object", "List", "Option", "Result", "Future",
+                "int", "uint", "float", "decimal", "complex", "bool", "String", "void",
+                "self", "null"));
+
+        for (Ast.ModuleDecl module : program.modules()) {
+            if (!module.name().equals(Parser.ROOT_MODULE)) localNames.add(module.name());
+            for (Ast.Decl declaration : module.declarations()) {
+                if (declaration instanceof Ast.FunctionDecl fn) localNames.add(fn.name());
+                else if (declaration instanceof Ast.ClassDecl klass) localNames.add(klass.name());
+                else if (declaration instanceof Ast.InterfaceDecl iface) localNames.add(iface.name());
+                else if (declaration instanceof Ast.FieldDecl field) localNames.add(field.name());
+                else if (declaration instanceof Ast.TypeAliasDecl alias) localNames.add(alias.name());
+            }
+        }
+
         for (Ast.ImportDecl imported : program.imports()) {
-            if (imported.path() == null || imported.path().isBlank()) throw new IllegalArgumentException("import path cannot be empty");
-            if (imported.wildcard()) {
-                if (imported.namespace() == null || imported.namespace().isBlank()) throw new IllegalArgumentException("wildcard imports require a namespace alias");
-                if (!exposed.add(imported.namespace())) throw new IllegalArgumentException("duplicate imported name '" + imported.namespace() + "'");
-                importedValues.add(imported.namespace());
-            } else {
-                if (imported.names().isEmpty()) throw new IllegalArgumentException("named import must select at least one name");
-                for (String name : imported.names()) {
-                    if (!exposed.add(name)) throw new IllegalArgumentException("duplicate imported name '" + name + "'");
-                    if (imported.kind() != Ast.ImportKind.CLASS) importedValues.add(name);
+            ImportRules.validate(imported);
+            for (String name : ImportRules.exposedBindings(imported)) {
+                if (!exposed.add(name)) throw new IllegalArgumentException("duplicate imported name '" + name + "'");
+                if (localNames.contains(name)) {
+                    throw new IllegalArgumentException("imported name '" + name + "' conflicts with a local or builtin name");
+                }
+                if (imported.kind() != Ast.ImportKind.CLASS || ImportRules.isJavaPath(imported.path())) {
+                    importedValues.add(name);
                 }
             }
         }
@@ -483,7 +499,6 @@ public final class TypeChecker {
             Env.Binding local = env.lookup(name.name());
             if (local != null) return local.type();
             if (name.name().equals("stdio") || name.name().equals("process") || name.name().equals("actor")) return new Named(name.name(), List.of());
-            if (name.name().equals("Thread")) return new Named("$ThreadFactory", List.of());
             if (name.name().equals("Mutex") || name.name().equals("SharedMutex")) return new Named("$" + name.name() + "Factory", List.of());
             if (name.name().equals("print")) return new Function(List.of(Unknown.INSTANCE), Primitive.VOID);
             if (name.name().equals("None")) return new Named("Option", List.of(Unknown.INSTANCE));
@@ -761,36 +776,6 @@ public final class TypeChecker {
                 if (member.member().equals("stdout")) return new Named("stdio.stdout", List.of());
             }
             Type receiver = typeOf(member.receiver(), env, generics, self);
-            Type threadReceiver = deref(receiver);
-            if (threadReceiver instanceof Named threadNamed
-                    && threadNamed.name().equals("$ThreadFactory")) {
-                return switch (member.member()) {
-                    case "currentThread", "current_thread" ->
-                            new Function(List.of(), new Named("Thread", List.of()));
-                    case "interrupted" -> new Function(List.of(), Primitive.BOOL);
-                    case "sleep" -> new Function(List.of(Primitive.INT), Primitive.VOID);
-                    case "yield" -> new Function(List.of(), Primitive.VOID);
-                    default -> throw new IllegalArgumentException(
-                            "unknown Thread static member '" + member.member() + "'");
-                };
-            }
-            if (threadReceiver instanceof Named threadNamed
-                    && threadNamed.name().equals("Thread")) {
-                return switch (member.member()) {
-                    case "start", "join", "interrupt" ->
-                            new Function(List.of(), Primitive.VOID);
-                    case "isAlive", "is_alive", "isInterrupted", "is_interrupted", "isVirtual", "is_virtual" ->
-                            new Function(List.of(), Primitive.BOOL);
-                    case "getName", "name", "getState", "state" ->
-                            new Function(List.of(), Primitive.STRING);
-                    case "setName", "set_name" ->
-                            new Function(List.of(Primitive.STRING), Primitive.VOID);
-                    case "threadId", "thread_id", "getId" ->
-                            new Function(List.of(), Primitive.INT);
-                    default -> throw new IllegalArgumentException(
-                            "unknown Thread member '" + member.member() + "'");
-                };
-            }
             Type sumReceiver = deref(receiver);
             Type sumMember = builtinOptionResultMember(sumReceiver, member.member());
             if (sumMember != null) return sumMember;
@@ -868,34 +853,6 @@ public final class TypeChecker {
             throw new IllegalArgumentException("indexing requires an array/list or tuple");
         }
         if (expr instanceof Ast.NewExpr created) {
-            if (created.type().name().equals("Thread")) {
-                if (currentActorKind != Ast.ActorKind.NONE) {
-                    throw new IllegalArgumentException(
-                            "actors cannot create dedicated Thread instances; use actor spawning/mailboxes");
-                }
-                if (created.arguments().size() < 1 || created.arguments().size() > 2) {
-                    throw new IllegalArgumentException(
-                            "Thread constructor expects one nlex zero-argument lambda and optional String name");
-                }
-                Ast.Expr target = created.arguments().getFirst();
-                if (!(target instanceof Ast.LambdaExpr lambda)
-                        || !lambda.nonLexical()
-                        || !lambda.parameters().isEmpty()) {
-                    throw new IllegalArgumentException(
-                            "Thread target must be an inline zero-argument nlex lambda");
-                }
-                validateLambdaAgainstExpected(
-                        lambda,
-                        new Function(List.of(), Primitive.VOID),
-                        env, generics, self);
-                if (created.arguments().size() == 2) {
-                    requireAssignable(
-                            typeOf(created.arguments().get(1), env, generics, self),
-                            Primitive.STRING,
-                            "Thread name");
-                }
-                return new Named("Thread", List.of());
-            }
             Ast.ClassDecl klass = findClass(created.type().name());
             if (klass == null) return resolve(created.type(), generics, self);
             if (klass.actorKind() != Ast.ActorKind.NONE) {
@@ -1112,7 +1069,7 @@ public final class TypeChecker {
             if (klass != null) {
                 ResolvedField field = findFieldTarget(klass, named, member.member(), new LinkedHashSet<>());
                 if (field != null) {
-                    Type pattern = classFieldType(field.owner(), field.field());
+                    Type pattern = resolve(field.field().type(), Set.copyOf(field.owner().genericParameters()), field.ownerType());
                     return substituteGenerics(pattern, classGenericBindings(field.owner(), field.ownerType()));
                 }
             }
@@ -1267,7 +1224,7 @@ public final class TypeChecker {
             // a parent T must never be resolved as an unrelated child T.
             for (Ast.FieldDecl field : klass.fields()) {
                 Type fieldType = resolveSharedGeneric(
-                        classFieldType(klass, field),
+                        resolve(field.type(), classGenerics, nominal),
                         classBindings);
                 if (!isSharedSafe(fieldType, seen, classBindings)) return false;
             }
@@ -1554,7 +1511,10 @@ public final class TypeChecker {
         Set<String> classGenericNames = Set.copyOf(klass.genericParameters());
         for (int i = 0; i < arguments.size(); i++) {
             ResolvedField resolvedField = fields.get(i);
-            Type fieldPattern = classFieldType(resolvedField.owner(), resolvedField.field());
+            Type fieldPattern = resolve(
+                    resolvedField.field().type(),
+                    Set.copyOf(resolvedField.owner().genericParameters()),
+                    resolvedField.ownerType());
             fieldPattern = substituteGenerics(
                     fieldPattern,
                     classGenericBindings(resolvedField.owner(), resolvedField.ownerType()));
@@ -2123,12 +2083,6 @@ public final class TypeChecker {
             case "bool", "Bool" -> Primitive.BOOL;
             case "string", "String" -> Primitive.STRING;
             case "void" -> Primitive.VOID;
-            case "Thread" -> {
-                if (!ref.arguments().isEmpty() || ref.inferArguments()) {
-                    throw new IllegalArgumentException("Thread does not accept type arguments");
-                }
-                yield new Named("Thread", List.of());
-            }
             case "Array", "List" -> {
                 if (!ref.inferArguments() && ref.arguments().size() != 1) throw new IllegalArgumentException(ref.name() + " requires exactly one type argument");
                 yield new ListType(ref.arguments().isEmpty() ? Unknown.INSTANCE : resolve(ref.arguments().getFirst(), generics, self));

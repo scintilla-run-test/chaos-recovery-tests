@@ -30,6 +30,7 @@ public final class OresContext implements AutoCloseable {
     private final ExecutionProfile executionProfile;
     private final ReentrantLock adversarialActorTurnLock = new ReentrantLock(true);
     private final Map<String, Object> linkedCodeUnits = new HashMap<>();
+    private final Map<String, Map<String, String>> linkedImportResolutions = new HashMap<>();
 
     public OresContext(OresLanguage language, TruffleLanguage.Env env) {
         this.language = language;
@@ -38,8 +39,9 @@ public final class OresContext implements AutoCloseable {
         this.output = new PrintWriter(env.out(), true);
         this.isolatePolicy = IsolatePolicy.fromApplicationArguments(env.getApplicationArguments());
         this.executionProfile = IsolatePolicy.executionProfileFromApplicationArguments(env.getApplicationArguments());
-        this.actors = ActorRuntime.processShared(
+        this.actors = new ActorRuntime(
                 isolatePolicy,
+                ActorRuntime.DispatcherConfig.defaults(),
                 this::executeActorTurn);
         this.garbageCollector = new RuntimeGarbageCollector();
         this.actors.setActorExitHook(garbageCollector::retireActorDomain);
@@ -58,6 +60,20 @@ public final class OresContext implements AutoCloseable {
     public UUID contextId() { return contextId; }
     public IsolatePolicy isolatePolicy() { return isolatePolicy; }
     public ExecutionProfile executionProfile() { return executionProfile; }
+
+    public Object lookupHostSymbol(String className) {
+        requireCapability(IsolatePolicy.Capability.JAVA_INTEROP, "Java host import " + className);
+        if (!env.isHostLookupAllowed()) {
+            throw new SecurityException("Java host class lookup is disabled by the embedding Context");
+        }
+        try {
+            return env.lookupHostSymbol(className);
+        } catch (RuntimeException failure) {
+            throw new IllegalArgumentException(
+                    "Java host class is not allowlisted or unavailable: " + className,
+                    failure);
+        }
+    }
 
     public void requireCapability(IsolatePolicy.Capability capability, String api) {
         IsolatePolicy actorPolicy = ActorRuntime.currentActorPolicy();
@@ -89,16 +105,6 @@ public final class OresContext implements AutoCloseable {
      */
     public void schedulerSafepoint() {
         schedulerSafepoints.incrementAndGet();
-        ActorRuntime carrierRuntime = ActorRuntime.currentActorRuntime();
-        if (carrierRuntime != null && carrierRuntime != actors) {
-            carrierRuntime.schedulerSafepoint();
-            return;
-        }
-        ActorRuntime rootRuntime = ActorRuntime.currentRootRuntime();
-        if (rootRuntime != null && rootRuntime != actors) {
-            rootRuntime.schedulerSafepoint();
-            return;
-        }
         actors.schedulerSafepoint();
     }
 
@@ -128,36 +134,47 @@ public final class OresContext implements AutoCloseable {
     }
 
     /**
-     * Enter this Truffle context from one explicit JNI-created OresThread.
-     * Dedicated threads are supervisor/main-process only; actor turns cannot
-     * use THREAD_CREATE to escape their dispatcher bulkhead.
+     * Registers the host compiler's exact filesystem resolution for one import.
+     * Guest code can only consume these aliases; it does not gain filesystem
+     * access by knowing the resolved target.
      */
-    public void executeExplicitThreadTurn(Runnable turn) {
-        requireCapability(IsolatePolicy.Capability.THREAD_CREATE, "Thread");
-        if (ActorRuntime.inActorExecution()) {
-            throw new SecurityException(
-                    "actors cannot enter a dedicated Thread; use actor spawning/mailboxes");
+    public synchronized void registerLinkedImportResolution(
+            String importerCodeUnitId,
+            String importPath,
+            String targetCodeUnitId) {
+        if (importerCodeUnitId == null || importerCodeUnitId.isBlank()) {
+            throw new IllegalArgumentException("importer code unit id cannot be blank");
         }
-        executeActorTurn(turn);
+        if (importPath == null || importPath.isBlank()) {
+            throw new IllegalArgumentException("linked import path cannot be blank");
+        }
+        if (targetCodeUnitId == null || targetCodeUnitId.isBlank()) {
+            throw new IllegalArgumentException("target code unit id cannot be blank");
+        }
+
+        Map<String, String> imports = linkedImportResolutions.computeIfAbsent(
+                normalizeCodeUnitId(importerCodeUnitId),
+                ignored -> new HashMap<>());
+        String target = normalizeCodeUnitId(targetCodeUnitId);
+        String previous = imports.putIfAbsent(importPath, target);
+        if (previous != null && !previous.equals(target)) {
+            throw new IllegalStateException(
+                    "conflicting import resolution for '" + importPath + "' in '" + importerCodeUnitId + "'");
+        }
+    }
+
+    public synchronized String resolvedLinkedImport(String importerCodeUnitId, String importPath) {
+        Map<String, String> imports = linkedImportResolutions.get(normalizeCodeUnitId(importerCodeUnitId));
+        return imports == null ? null : imports.get(importPath);
+    }
+
+    private static String normalizeCodeUnitId(String id) {
+        return java.nio.file.Path.of(id).normalize().toString().replace('\\', '/');
     }
 
     private void executeActorTurn(Runnable turn) {
         boolean serialize = isolatePolicy.adversarial();
-        boolean lockHeld = false;
-        if (serialize) {
-            try {
-                // A watchdog must be able to wake a carrier that is queued
-                // behind another adversarial turn. ReentrantLock.lock() is not
-                // interruptible and would let one hostile turn pin every
-                // carrier waiting to enter this context.
-                adversarialActorTurnLock.lockInterruptibly();
-                lockHeld = true;
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                throw new java.util.concurrent.CancellationException(
-                        "adversarial actor interrupted while waiting to enter its Truffle context");
-            }
-        }
+        if (serialize) adversarialActorTurnLock.lock();
         TruffleContext truffleContext = env.getContext();
         Object previous = null;
         boolean entered = false;
@@ -167,7 +184,7 @@ public final class OresContext implements AutoCloseable {
             turn.run();
         } finally {
             if (entered) truffleContext.leave(null, previous);
-            if (lockHeld) adversarialActorTurnLock.unlock();
+            if (serialize) adversarialActorTurnLock.unlock();
         }
     }
 
@@ -189,6 +206,7 @@ public final class OresContext implements AutoCloseable {
         } finally {
             synchronized (this) {
                 linkedCodeUnits.clear();
+                linkedImportResolutions.clear();
             }
             garbageCollector.close();
             output.flush();
