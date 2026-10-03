@@ -1,0 +1,167 @@
+name: oreslang-demos-hardened-smoke
+
+on:
+  push:
+    branches:
+      - "feat/oreslang-demos-hardened-*"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Build local mirrored Oreslang compiler
+        run: |
+          mvn -q -DskipTests package
+          mvn -q dependency:build-classpath -Dmdep.outputFile=target/classpath.txt
+          cat > target/oreslang-compiler <<'SH'
+          #!/usr/bin/env sh
+          set -eu
+          root="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+          exec java -cp "$root/target/classes:$(cat "$root/target/classpath.txt")" dev.oreslang.launcher.OresMain "$@"
+          SH
+          chmod +x target/oreslang-compiler
+
+      - name: Verify mirrored source identity
+        run: test "$(cat demo-source/SOURCE_SHA)" = "502fdddffa69d322a886a51512938fe23eb3c54c"
+
+      - name: Compile hardened Java hosts
+        run: |
+          javac -Xlint:all demo-source/desktop-app/DesktopHost.java
+          javac -Xlint:all demo-source/web-server/HttpHost.java
+
+      - name: Run stitched CLI through real compiler
+        run: |
+          mkdir -p "target/tmp root"
+          (
+            cd demo-source/cli
+            TMPDIR="$GITHUB_WORKSPACE/target/tmp root" \
+            ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/oreslang-compiler" \
+              ./run.sh
+          ) | tee target/cli.out
+          grep -Fx "Oreslang CLI demo" target/cli.out
+          grep -Fx "19 + 23 =" target/cli.out
+          grep -Fx "42" target/cli.out
+
+      - name: Validate desktop manifest through hardened host
+        run: |
+          cat \
+            demo-source/desktop-app/title.ores \
+            demo-source/desktop-app/body.ores \
+            demo-source/desktop-app/window.ores \
+            demo-source/desktop-app/DesktopApp.ores \
+            > target/DesktopApp.ores
+
+          ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/oreslang-compiler" \
+            java demo-source/desktop-app/DesktopHost.java \
+              --manifest-only target/DesktopApp.ores \
+            | tee target/desktop.out
+
+          grep -Fx "Oreslang Desktop Demo" target/desktop.out
+          grep -Fx "640" target/desktop.out
+          grep -Fx "360" target/desktop.out
+          grep -F "configured and populated by an Oreslang program" target/desktop.out
+
+      - name: Run web host and verify HTTP behavior
+        run: |
+          cat \
+            demo-source/web-server/index.ores \
+            demo-source/web-server/health.ores \
+            demo-source/web-server/WebServer.ores \
+            > target/WebServer.ores
+
+          PORT=18080 \
+          ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/oreslang-compiler" \
+            java demo-source/web-server/HttpHost.java target/WebServer.ores \
+            > target/web-host.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          ready=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/health > target/health.json; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1
+
+          test "$(cat target/health.json)" = '{"status":"ok","language":"oreslang"}'
+          curl -fsS http://127.0.0.1:18080/ | grep -F "This route and response body are defined by Oreslang."
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/missing)" = "404"
+          test "$(curl -sS -X POST -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/health)" = "405"
+          curl -sS -X POST -D - -o /dev/null http://127.0.0.1:18080/health | grep -i '^Allow: GET'
+          curl -sS -D - -o /dev/null http://127.0.0.1:18080/health | grep -i '^X-Content-Type-Options: nosniff'
+
+      - name: Reject invalid web port before guest launch
+        run: |
+          cat > target/must-not-run <<'SH'
+          #!/usr/bin/env sh
+          echo "compiler unexpectedly ran" >&2
+          exit 99
+          SH
+          chmod +x target/must-not-run
+
+          set +e
+          PORT=70000 \
+          ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/must-not-run" \
+            java demo-source/web-server/HttpHost.java target/WebServer.ores \
+            > target/invalid-port.out 2>&1
+          rc=$?
+          set -e
+
+          test "$rc" -ne 0
+          grep -F "PORT must be between 1 and 65535" target/invalid-port.out
+          ! grep -F "compiler unexpectedly ran" target/invalid-port.out
+
+      - name: Verify guest-output bound does not deadlock
+        run: |
+          cat > target/noisy-compiler <<'SH'
+          #!/usr/bin/env sh
+          set -eu
+          head -c 1100000 /dev/zero | tr '\0' x
+          SH
+          chmod +x target/noisy-compiler
+
+          set +e
+          timeout 15s env \
+            ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/noisy-compiler" \
+            java demo-source/desktop-app/DesktopHost.java \
+              --manifest-only target/DesktopApp.ores \
+            > target/noisy.out 2>&1
+          rc=$?
+          set -e
+
+          test "$rc" -ne 0
+          test "$rc" -ne 124
+          grep -F "failed to capture guest stdout" target/noisy.out
+
+      - name: Run Oreslang to Java codegen interop
+        run: |
+          (
+            cd demo-source/interop
+            TMPDIR="$GITHUB_WORKSPACE/target/tmp root" \
+            ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/oreslang-compiler" \
+              ./run-oreslang-embeds-java.sh
+          ) | tee target/ores-to-java.out
+          grep -Fx "42" target/ores-to-java.out
+
+      - name: Run Java to Oreslang in-process interop
+        run: |
+          (
+            cd demo-source/interop
+            ORESLANG_CLASSPATH="$GITHUB_WORKSPACE/target/classes:$(cat "$GITHUB_WORKSPACE/target/classpath.txt")" \
+              ./run-java-embeds-oreslang.sh
+          ) | tee target/java-to-ores.out
+          grep -Fx "java host <- oreslang guest: 42" target/java-to-ores.out
