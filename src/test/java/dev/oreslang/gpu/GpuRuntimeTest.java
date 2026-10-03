@@ -82,6 +82,23 @@ final class GpuRuntimeTest {
     }
 
     @Test
+    void downloadedArraysAreDetachedMutableHostCopies() {
+        GpuRuntime.installBackend(new TransferBackend("mutable-download"));
+        GpuRuntime runtime = new GpuRuntime();
+
+        GpuRuntime.ArrayHandle array = runtime.uploadArray(List.of(1L, 2L, 3L));
+        List<?> downloaded = runtime.downloadArray(array);
+
+        @SuppressWarnings("unchecked")
+        List<Object> mutable = (List<Object>) downloaded;
+        mutable.set(0, 99L);
+
+        assertEquals(List.of(99L, 2L, 3L), mutable);
+        assertEquals(List.of(1L, 2L, 3L), runtime.downloadArray(array),
+                "host mutation must not mutate device-resident storage");
+    }
+
+    @Test
     void rejectsBackendDownloadLengthMismatch() {
         GpuRuntime.installBackend(new GpuRuntime.Backend() {
             @Override public String name() { return "bad-length"; }

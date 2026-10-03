@@ -88,6 +88,10 @@ Actor transport is independently hardened from mutex synchronization. Ordinary m
 ## GPU placement boundary
 
 `gpu` source is a distinct execution target, not a performance annotation on ordinary Truffle execution.
+GPU use is also an explicit isolate capability. Strict/adversarial policies deny `GPU`
+unless the host grants it; developer/trusted policies may opt in. Capability admission
+covers GPU callables, resident types, kernel expressions, and runtime transfer/orchestration
+facades.
 
 The trusted compiler pipeline is:
 
@@ -104,7 +108,22 @@ A zero-argument/void `gpu parallel` batch gets individual kernel entrypoints plu
 
 The GPU artifact declares device requirements explicitly. In particular, `cl_khr_fp64` is requested only when the emitted code uses `double`, avoiding an unnecessary compatibility requirement for integer/f32-only programs.
 
-The current Truffle evaluator does not emulate or CPU-fallback GPU execution. If a GPU-targeted named function, static function, lambda, or batch reaches the evaluator without a configured physical GPU launcher, execution fails closed. A future launcher should consume the already-generated `GpuProgram` artifact, compile/cache the OpenCL source for the selected device, bind buffers/scalars according to the manifest, and launch according to `SINGLE_WORK_ITEM`, `DATA_PARALLEL_1D`, or batch-dispatch metadata. It must also honor launch-safety flags: clamp signed negative global-work extents to zero, size error/result slots from the launch plan, and reject overlapping global-buffer bindings whenever the manifest marks the kernel as requiring no-alias enforcement.
+The evaluator now executes **resident-data host orchestration** through `GpuRuntime`:
+`GpuArray.from_cpu`, `GpuArray.length`, `GpuArray.stream`, `GpuArray.copy_to_cpu`,
+`GpuStream.from_array`, `GpuStream.collect`, and `GpuStream.copy_to_cpu`. Uploads
+freeze/copy host inputs before handing them to the backend; downloads return a fresh
+detached mutable host Array/List.
+
+The evaluator still does not emulate or CPU-fallback GPU **kernel execution**. If a
+GPU-targeted named function, static function, lambda, or batch reaches the evaluator
+without a configured physical GPU launcher, execution fails closed. A future launcher
+should consume the already-generated `GpuProgram` artifact, compile/cache the OpenCL
+source for the selected device, bind buffers/scalars according to the manifest, and launch
+according to `SINGLE_WORK_ITEM`, `DATA_PARALLEL_1D`, or batch-dispatch metadata. It
+must honor GPU ABI v2 launch-safety flags: clamp signed negative global-work extents to
+zero, skip submission when the resolved global work-item count is zero, size error/result
+slots from the launch plan, and reject overlapping global-buffer bindings whenever the
+manifest marks the kernel as requiring no-alias enforcement.
 
 Oreslang does not expose stable "GPU core N" affinity because that is not a portable hardware abstraction. Backends remain responsible for lanes/warps/wavefronts/work-groups, occupancy, queueing, and physical device selection. Multi-GPU affinity can be added separately once the runtime has a real device scheduler.
 

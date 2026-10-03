@@ -5,6 +5,7 @@ import com.oracle.truffle.api.frame.VirtualFrame;
 import com.oracle.truffle.api.nodes.RootNode;
 import dev.oreslang.OresLanguage;
 import dev.oreslang.ast.Ast;
+import dev.oreslang.gpu.GpuRuntime;
 import dev.oreslang.runtime.OresContext;
 import dev.oreslang.runtime.CapabilityChecker;
 import dev.oreslang.runtime.IsolatePolicy;
@@ -246,6 +247,8 @@ public final class OresEvalRootNode extends RootNode {
                 if (name.name().equals("process")) return new ProcessFacade(context);
                 if (name.name().equals("Mutex")) return new MutexFactory(false, context);
                 if (name.name().equals("SharedMutex")) return new MutexFactory(true, context);
+                if (name.name().equals("GpuArray")) return new GpuArrayFactory(context);
+                if (name.name().equals("GpuStream")) return new GpuStreamFactory(context);
                 if (name.name().equals("print")) return (Invokable) args -> {
                     context.requireCapability(IsolatePolicy.Capability.STDOUT, "print");
                     requireOne(args, "print"); context.output().print(display(args.getFirst())); context.output().flush(); return null;
@@ -440,6 +443,53 @@ public final class OresEvalRootNode extends RootNode {
             if (receiver instanceof MutexFactory factory) {
                 if (!name.equals("new")) throw new IllegalArgumentException("unknown mutex factory member " + name);
                 return (Invokable) factory::create;
+            }
+            if (receiver instanceof GpuArrayFactory factory) {
+                if (!name.equals("from_cpu")) {
+                    throw new IllegalArgumentException("unknown GpuArray core function " + name);
+                }
+                return (Invokable) factory::fromCpu;
+            }
+            if (receiver instanceof GpuStreamFactory factory) {
+                if (!name.equals("from_array")) {
+                    throw new IllegalArgumentException("unknown GpuStream core function " + name);
+                }
+                return (Invokable) factory::fromArray;
+            }
+            if (receiver instanceof GpuRuntime.ArrayHandle array) {
+                return switch (name) {
+                    case "stream" -> (Invokable) args -> {
+                        requireZero(args, "GpuArray.stream");
+                        context.requireCapability(IsolatePolicy.Capability.GPU, "GpuArray.stream");
+                        return context.gpuRuntime().stream(array);
+                    };
+                    case "copy_to_cpu" -> (Invokable) args -> {
+                        requireZero(args, "GpuArray.copy_to_cpu");
+                        context.requireCapability(IsolatePolicy.Capability.GPU, "GpuArray.copy_to_cpu");
+                        return context.gpuRuntime().downloadArray(array);
+                    };
+                    case "length" -> (Invokable) args -> {
+                        requireZero(args, "GpuArray.length");
+                        context.requireCapability(IsolatePolicy.Capability.GPU, "GpuArray.length");
+                        return array.length();
+                    };
+                    default -> throw new IllegalArgumentException("unknown GpuArray member " + name);
+                };
+            }
+            if (receiver instanceof GpuRuntime.StreamHandle stream) {
+                return switch (name) {
+                    case "collect" -> (Invokable) args -> {
+                        requireZero(args, "GpuStream.collect");
+                        context.requireCapability(IsolatePolicy.Capability.GPU, "GpuStream.collect");
+                        return context.gpuRuntime().collect(stream);
+                    };
+                    case "copy_to_cpu" -> (Invokable) args -> {
+                        requireZero(args, "GpuStream.copy_to_cpu");
+                        context.requireCapability(IsolatePolicy.Capability.GPU, "GpuStream.copy_to_cpu");
+                        return context.gpuRuntime().downloadStream(stream);
+                    };
+                    default -> throw new IllegalArgumentException("unknown GpuStream member " + name);
+                };
             }
             if (receiver instanceof OresMutex.Lock<?> lock) return mutexMember(lock, name);
             if (receiver instanceof OresMutex.Guard<?> guard) {
@@ -928,6 +978,29 @@ public final class OresEvalRootNode extends RootNode {
 
     private record ModuleFacade(Ast.ModuleDecl module) { }
     private record ClassFacade(Ast.ClassDecl klass) { }
+
+    private record GpuArrayFactory(OresContext context) {
+        private Object fromCpu(List<Object> args) {
+            context.requireCapability(IsolatePolicy.Capability.GPU, "GpuArray.from_cpu");
+            requireOne(args, "GpuArray.from_cpu");
+            if (!(args.getFirst() instanceof List<?> values)) {
+                throw new IllegalArgumentException("GpuArray.from_cpu expects an Array/List value");
+            }
+            return context.gpuRuntime().uploadArray(values);
+        }
+    }
+
+    private record GpuStreamFactory(OresContext context) {
+        private Object fromArray(List<Object> args) {
+            context.requireCapability(IsolatePolicy.Capability.GPU, "GpuStream.from_array");
+            requireOne(args, "GpuStream.from_array");
+            if (!(args.getFirst() instanceof GpuRuntime.ArrayHandle array)) {
+                throw new IllegalArgumentException("GpuStream.from_array expects a GpuArray");
+            }
+            return context.gpuRuntime().stream(array);
+        }
+    }
+
     private record MutexFactory(boolean shared, OresContext context) {
         private Object create(List<Object> args) {
             requireOne(args, shared ? "SharedMutex.new" : "Mutex.new");

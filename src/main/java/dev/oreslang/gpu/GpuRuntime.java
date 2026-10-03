@@ -213,7 +213,9 @@ public final class GpuRuntime {
                     "GPU backend '" + array.backend.name() + "' returned " + list.size()
                             + " element(s) for GpuArray length " + array.length);
         }
-        return list;
+        // Device -> host is a copy boundary. Return a fresh mutable host Array/List so
+        // ordinary Oreslang indexed mutation semantics continue to work after download.
+        return new ArrayList<>(list);
     }
 
     public StreamHandle stream(ArrayHandle array) {

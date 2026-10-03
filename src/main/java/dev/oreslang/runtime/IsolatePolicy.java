@@ -31,6 +31,7 @@ public record IsolatePolicy(
         PROCESS_INFO,
         ACTOR_SHARE_READONLY,
         SHARED_MEMORY,
+        GPU,
         NETWORK,
         FILESYSTEM_READ,
         FILESYSTEM_WRITE,
@@ -70,7 +71,7 @@ public record IsolatePolicy(
     public static IsolatePolicy developer() {
         return new IsolatePolicy(
                 Set.of(Capability.STDIN, Capability.STDOUT, Capability.PROCESS_INFO,
-                        Capability.ACTOR_SHARE_READONLY, Capability.SHARED_MEMORY, Capability.HOT_CODE_LOAD),
+                        Capability.ACTOR_SHARE_READONLY, Capability.SHARED_MEMORY, Capability.GPU, Capability.HOT_CODE_LOAD),
                 512L * 1024 * 1024, 8192, Duration.ofMinutes(10), false);
     }
 

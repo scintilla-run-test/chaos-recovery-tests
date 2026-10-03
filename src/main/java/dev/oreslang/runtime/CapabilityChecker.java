@@ -15,6 +15,9 @@ public final class CapabilityChecker {
         for (Ast.ModuleDecl module : program.modules()) {
             for (Ast.Decl declaration : module.declarations()) {
                 if (declaration instanceof Ast.FunctionDecl fn) {
+                    if (Ast.hasGpuPlacement(fn.annotations())) {
+                        require(policy, IsolatePolicy.Capability.GPU, "gpu fnc " + fn.name());
+                    }
                     checkCallableTypes(fn.parameters(), fn.returnType(), policy);
                     checkStatements(fn.body(), policy);
                 } else if (declaration instanceof Ast.ClassDecl klass) {
@@ -25,6 +28,9 @@ public final class CapabilityChecker {
                         if (field.initializer() != null) checkExpr(field.initializer(), policy);
                     }
                     for (Ast.MethodDecl method : klass.methods()) {
+                        if (Ast.hasGpuPlacement(method.annotations())) {
+                            require(policy, IsolatePolicy.Capability.GPU, "gpu static fnc " + klass.name() + "." + method.name());
+                        }
                         checkType(method.explicitReceiverType(), policy);
                         checkCallableTypes(method.parameters(), method.returnType(), policy);
                         checkStatements(method.body(), policy);
@@ -60,6 +66,9 @@ public final class CapabilityChecker {
         if (type == null) return;
         if (type.name().equals("SharedMutex")) {
             require(policy, IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex<T>");
+        }
+        if (type.name().equals("GpuArray") || type.name().equals("GpuStream")) {
+            require(policy, IsolatePolicy.Capability.GPU, type.name() + "<T>");
         }
         for (Ast.TypeRef argument : type.arguments()) checkType(argument, policy);
     }
@@ -101,6 +110,9 @@ public final class CapabilityChecker {
             require(policy, IsolatePolicy.Capability.STDOUT, "print");
         } else if (expr instanceof Ast.NameExpr n && n.name().equals("SharedMutex")) {
             require(policy, IsolatePolicy.Capability.SHARED_MEMORY, "SharedMutex");
+        } else if (expr instanceof Ast.NameExpr n
+                && (n.name().equals("GpuArray") || n.name().equals("GpuStream"))) {
+            require(policy, IsolatePolicy.Capability.GPU, n.name());
         }
         else if (expr instanceof Ast.CallExpr c) {
             checkExpr(c.callee(), policy);
@@ -112,6 +124,10 @@ public final class CapabilityChecker {
                 if (path.startsWith("process.descriptor") || path.equals("process.context_id")) require(policy, IsolatePolicy.Capability.PROCESS_INFO, path);
                 if (path.startsWith("process.share_readonly")) require(policy, IsolatePolicy.Capability.ACTOR_SHARE_READONLY, path);
                 if (path.equals("SharedMutex") || path.startsWith("SharedMutex.")) require(policy, IsolatePolicy.Capability.SHARED_MEMORY, path);
+                if (path.equals("GpuArray") || path.startsWith("GpuArray.")
+                        || path.equals("GpuStream") || path.startsWith("GpuStream.")) {
+                    require(policy, IsolatePolicy.Capability.GPU, path);
+                }
                 if (path.startsWith("network.")) require(policy, IsolatePolicy.Capability.NETWORK, path);
                 if (path.startsWith("fs.read")) require(policy, IsolatePolicy.Capability.FILESYSTEM_READ, path);
                 if (path.startsWith("fs.write")) require(policy, IsolatePolicy.Capability.FILESYSTEM_WRITE, path);
@@ -135,7 +151,13 @@ public final class CapabilityChecker {
         else if (expr instanceof Ast.ListExpr e) for (Ast.Expr a : e.elements()) checkExpr(a, policy);
         else if (expr instanceof Ast.TupleExpr e) for (Ast.Expr a : e.elements()) checkExpr(a, policy);
         else if (expr instanceof Ast.ObjectExpr e) for (Ast.ObjectField f : e.fields()) checkExpr(f.value(), policy);
-        else if (expr instanceof Ast.GpuExpr e) checkExpr(e.expression(), policy);
+        else if (expr instanceof Ast.GpuExpr e) {
+            require(policy, IsolatePolicy.Capability.GPU, "gpu kernel expression");
+            checkExpr(e.expression(), policy);
+        }
+        else if (expr instanceof Ast.GpuIntrinsicExpr) {
+            require(policy, IsolatePolicy.Capability.GPU, "gpu work-item intrinsic");
+        }
         else if (expr instanceof Ast.LambdaExpr e) {
             if (e.expressionBody() != null) checkExpr(e.expressionBody(), policy);
             if (e.blockBody() != null) checkStatements(e.blockBody(), policy);

@@ -4,6 +4,7 @@ import com.oracle.truffle.api.TruffleLanguage;
 import com.oracle.truffle.api.TruffleLanguage.ContextReference;
 import com.oracle.truffle.api.nodes.Node;
 import dev.oreslang.OresLanguage;
+import dev.oreslang.gpu.GpuRuntime;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -20,6 +21,7 @@ public final class OresContext implements AutoCloseable {
     private final BufferedReader input;
     private final PrintWriter output;
     private final ActorRuntime actors;
+    private final GpuRuntime gpuRuntime = new GpuRuntime();
     private final UUID contextId = UUID.randomUUID();
     private final AtomicLong schedulerSafepoints = new AtomicLong();
     private final IsolatePolicy isolatePolicy;
@@ -44,6 +46,7 @@ public final class OresContext implements AutoCloseable {
     public BufferedReader input() { return input; }
     public PrintWriter output() { return output; }
     public ActorRuntime actors() { return actors; }
+    public GpuRuntime gpuRuntime() { return gpuRuntime; }
     public UUID contextId() { return contextId; }
     public IsolatePolicy isolatePolicy() { return isolatePolicy; }
     public ExecutionProfile executionProfile() { return executionProfile; }

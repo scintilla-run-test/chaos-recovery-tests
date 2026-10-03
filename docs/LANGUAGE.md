@@ -944,6 +944,11 @@ an implicit host capture. GPU values must cross the kernel ABI explicitly.
 
 ### Memory model
 
+GPU access is capability-scoped. Strict/adversarial isolate policies do not receive the
+`GPU` capability by default; developer/trusted policies may grant it explicitly.
+Resident host orchestration (`GpuArray.from_cpu`, `copy_to_cpu`, `stream`,
+`GpuStream.from_array`, and `collect`) checks that capability again at runtime.
+
 GPU kernels operate on scalar registers and flat contiguous buffers. `GpuArray<T>` is
 the preferred device-resident random-access container; `Array<T>`/`List<T>` remain
 flat-buffer ABI forms for host/device boundary lowering. Nested buffer layouts, linked
@@ -953,6 +958,12 @@ pointer-heavy host layouts are rejected by the current device ABI.
 For multi-field data, structure-of-arrays layouts are generally friendlier to coalesced
 GPU access than pointer-rich arrays of host objects. That is a performance guideline,
 not a separate type-system rule.
+
+`GpuArray.from_cpu(values)` creates a device-resident copy. `copy_to_cpu()` creates a
+fresh detached **mutable** host Array/List; mutating that host copy does not mutate the
+device allocation. `stream()` / `GpuStream.from_array()` preserve device ownership,
+and `collect()` materializes a device-resident array without routing elements through
+the host.
 
 The compiler emits hidden lengths for every flat buffer and bounds-checks indexed access.
 Kernel-entry buffers emitted with `restrict` carry a no-alias launch contract that

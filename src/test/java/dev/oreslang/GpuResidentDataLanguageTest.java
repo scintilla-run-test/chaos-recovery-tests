@@ -1,12 +1,20 @@
 package dev.oreslang;
 
+import dev.oreslang.gpu.GpuRuntime;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.types.TypeChecker;
+import org.graalvm.polyglot.Context;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 final class GpuResidentDataLanguageTest {
+    @AfterEach
+    void clearGpuBackend() {
+        GpuRuntime.clearBackend();
+    }
+
     @Test
     void hostOrchestrationTypesRoundTripThroughGpuArrayAndStream() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
@@ -26,6 +34,35 @@ final class GpuResidentDataLanguageTest {
                   return values.copy_to_cpu();
                 }
                 """)));
+    }
+
+    @Test
+    void hostOrchestrationExecutesThroughGpuRuntimeBackend() {
+        GpuRuntime.installBackend(new GpuRuntime.Backend() {
+            @Override public String name() { return "language-roundtrip"; }
+            @Override public Object invoke(GpuRuntime.Invocation invocation) { return null; }
+            @Override public Object uploadArray(java.util.List<?> values) { return java.util.List.copyOf(values); }
+            @Override public java.util.List<?> downloadArray(Object token, long length) { return (java.util.List<?>) token; }
+        });
+
+        assertDoesNotThrow(() -> {
+            try (Context context = Context.newBuilder(OresLanguage.ID)
+                    .allowAllAccess(false)
+                    .build()) {
+                context.eval(OresLanguage.ID, """
+                        pub routine main() => void {
+                          const cpu = [1, 2, 3];
+                          const values = GpuArray.from_cpu(cpu);
+                          const n = values.length();
+                          const stream = values.stream();
+                          const collected = stream.collect();
+                          let cpu_again = collected.copy_to_cpu();
+                          cpu_again[0] = 99;
+                          return;
+                        }
+                        """);
+            }
+        });
     }
 
     @Test
