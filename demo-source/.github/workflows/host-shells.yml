@@ -1,0 +1,47 @@
+name: host-shells
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-host-shells:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Compile desktop host with warnings
+        run: javac -Xlint:all desktop-app/DesktopHost.java
+      - name: Compile web host with warnings
+        run: javac -Xlint:all web-server/HttpHost.java
+      - name: Check shell scripts
+        run: |
+          sh -n cli/run.sh
+          sh -n desktop-app/run.sh
+          sh -n web-server/run.sh
+          sh -n interop/run-java-embeds-oreslang.sh
+          sh -n interop/run-oreslang-embeds-java.sh
+      - name: Verify secure temporary-directory handling
+        run: |
+          grep -q 'mktemp -d' cli/run.sh
+          grep -q 'mktemp -d' desktop-app/run.sh
+          grep -q 'mktemp -d' web-server/run.sh
+          grep -q 'mktemp -d' interop/run-oreslang-embeds-java.sh
+          ! grep -R --include='run*.sh' 'demo-\$\$\|interop-\$\$' cli desktop-app web-server interop
+      - name: Verify authored Oreslang file counts
+        run: |
+          test "$(find cli -maxdepth 1 -name '*.ores' | wc -l)" -eq 3
+          test "$(find web-server -maxdepth 1 -name '*.ores' | wc -l)" -eq 3
+          test "$(find desktop-app -maxdepth 1 -name '*.ores' | wc -l)" -ge 4
+          test "$(find interop -maxdepth 1 -name '*.ores' | wc -l)" -ge 1
+      - name: Verify mixed-source interop examples
+        run: |
+          grep -q 'define module embedded_math' interop/JavaEmbedsOreslang.java
+          grep -q 'public final class HelloFromGeneratedJava' interop/OreslangEmbedsJava.ores
