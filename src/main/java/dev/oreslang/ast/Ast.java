@@ -37,7 +37,7 @@ public final class Ast {
 
     public enum Visibility { PRIVATE, PUBLIC }
     public enum CallableKind { FNC, ROUTINE }
-    public enum ActorKind { NONE, PRIVATE, SHARED, UNTRUSTED }
+    public enum ActorKind { NONE, PRIVATE, SHARED }
 
     public record Annotation(String name, List<TypeRef> arguments) {
         public Annotation { arguments = List.copyOf(arguments); }
