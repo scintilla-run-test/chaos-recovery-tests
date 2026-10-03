@@ -2,15 +2,16 @@ package dev.oreslang.nodes;
 
 import com.oracle.truffle.api.CompilerDirectives.TruffleBoundary;
 import com.oracle.truffle.api.frame.VirtualFrame;
+import com.oracle.truffle.api.interop.InteropLibrary;
 import com.oracle.truffle.api.nodes.RootNode;
 import dev.oreslang.OresLanguage;
 import dev.oreslang.ast.Ast;
+import dev.oreslang.imports.ImportRules;
 import dev.oreslang.parser.Parser;
 import dev.oreslang.runtime.OresContext;
 import dev.oreslang.runtime.CapabilityChecker;
 import dev.oreslang.runtime.IsolatePolicy;
 import dev.oreslang.runtime.OresMutex;
-import dev.oreslang.runtime.OresThread;
 import dev.oreslang.runtime.ActorRuntime;
 
 import java.nio.file.Path;
@@ -30,6 +31,8 @@ public final class OresEvalRootNode extends RootNode {
     public static final String LINK_ONLY_COMMAND = "__ores_internal_link_only__";
     public static final String INIT_ONLY_COMMAND = "__ores_internal_init_only__";
     public static final String MAIN_ONLY_COMMAND = "__ores_internal_main_only__";
+    public static final String INVOKE_PUBLIC_COMMAND = "__ores_internal_invoke_public__";
+    public static final String REGISTER_IMPORT_COMMAND = "__ores_internal_register_import__";
 
     private final Ast.Program program;
     private final String codeUnitId;
@@ -56,6 +59,14 @@ public final class OresEvalRootNode extends RootNode {
     @TruffleBoundary
     private Object executeBoundary(OresContext context, Object[] arguments) {
         CapabilityChecker.check(program, context.isolatePolicy());
+        if (arguments.length == 3
+                && REGISTER_IMPORT_COMMAND.equals(arguments[0])
+                && arguments[1] instanceof String importPath
+                && arguments[2] instanceof String targetCodeUnitId) {
+            context.registerLinkedImportResolution(codeUnitId, importPath, targetCodeUnitId);
+            return null;
+        }
+
         Evaluator current = evaluator(context);
         if (isControl(arguments, LINK_ONLY_COMMAND)) {
             current.link();
@@ -69,12 +80,15 @@ public final class OresEvalRootNode extends RootNode {
             current.link();
             return current.executeMain(new Object[0]);
         }
+        if (arguments.length >= 2
+                && INVOKE_PUBLIC_COMMAND.equals(arguments[0])
+                && arguments[1] instanceof String functionName) {
+            current.link();
+            return current.invokePublic(functionName, java.util.Arrays.copyOfRange(arguments, 2, arguments.length));
+        }
 
-        // RootNode is already executing inside an entered Graal context. It
-        // must not hop to another carrier here. Official launchers place the
-        // entire Context lifecycle on the process SHARED/root carrier before
-        // entering Graal; direct embedders retain ownership of their entry
-        // thread unless they opt into ActorRuntime.executeProcessRoot(...).
+        // Backward-compatible single-source execution. Multi-file hosts use
+        // link/init/main commands to install a full import graph before init.
         current.link();
         current.initialize();
         return current.executeMain(arguments);
@@ -102,8 +116,11 @@ public final class OresEvalRootNode extends RootNode {
         private final Map<String, Ast.ClassDecl> classes = new HashMap<>();
         private final Map<String, Ast.TypeAliasDecl> typeAliases = new HashMap<>();
         private final Map<String, Ast.ModuleDecl> modules = new HashMap<>();
-        private final Map<String, Ast.ImportDecl> namedImports = new HashMap<>();
+        private final Map<String, ImportedBinding> namedImports = new HashMap<>();
         private final Map<String, Ast.ImportDecl> namespaceImports = new HashMap<>();
+        private final Map<String, HostClassFacade> hostClasses = new HashMap<>();
+        private final Map<String, Invokable> hostFunctions = new HashMap<>();
+        private final Map<String, HostClassFacade> hostSymbols = new HashMap<>();
         private final Set<String> ambiguousFunctions = new LinkedHashSet<>();
         private final Set<String> ambiguousClasses = new LinkedHashSet<>();
         private final Set<String> ambiguousTypeAliases = new LinkedHashSet<>();
@@ -119,11 +136,80 @@ public final class OresEvalRootNode extends RootNode {
 
         private void indexImports() {
             for (Ast.ImportDecl imported : program.imports()) {
+                ImportRules.validate(imported);
+                if (ImportRules.isJavaPath(imported.path())) {
+                    indexHostImport(imported);
+                    continue;
+                }
+
                 if (imported.wildcard()) {
                     namespaceImports.put(imported.namespace(), imported);
                 } else {
-                    for (String name : imported.names()) namedImports.put(name, imported);
+                    for (String sourceName : imported.names()) {
+                        String localName = ImportRules.localName(imported, sourceName);
+                        ImportedBinding previous = namedImports.putIfAbsent(
+                                localName,
+                                new ImportedBinding(imported, sourceName));
+                        if (previous != null) {
+                            throw new IllegalArgumentException("duplicate import binding " + localName);
+                        }
+                    }
                 }
+            }
+        }
+
+        private void indexHostImport(Ast.ImportDecl imported) {
+            String className = ImportRules.javaClassName(imported.path());
+            HostClassFacade symbol = hostSymbols.computeIfAbsent(
+                    className,
+                    ignored -> new HostClassFacade(className, context.lookupHostSymbol(className), true));
+
+            if (imported.kind() == Ast.ImportKind.CLASS) {
+                String sourceName = imported.names().getFirst();
+                putHostClass(ImportRules.localName(imported, sourceName), symbol);
+                return;
+            }
+
+            if (imported.kind() == Ast.ImportKind.FUNCTION && imported.wildcard()) {
+                putHostClass(imported.namespace(), new HostClassFacade(className, symbol.symbol(), false));
+                return;
+            }
+
+            if (imported.kind() == Ast.ImportKind.FUNCTION) {
+                InteropLibrary interop = InteropLibrary.getUncached(symbol.symbol());
+                for (String sourceName : imported.names()) {
+                    if (!interop.isMemberInvocable(symbol.symbol(), sourceName)) {
+                        throw new IllegalArgumentException("Java host class '" + className
+                                + "' does not export invocable static member '" + sourceName + "'");
+                    }
+                    String localName = ImportRules.localName(imported, sourceName);
+                    putHostFunction(localName, args -> {
+                        context.requireCapability(
+                                IsolatePolicy.Capability.JAVA_INTEROP,
+                                "Java host method " + className + "." + sourceName);
+                        return invokeHostMember(symbol.symbol(), sourceName, args);
+                    });
+                }
+                return;
+            }
+
+            if (imported.kind() == Ast.ImportKind.ALL) {
+                putHostClass(imported.namespace(), symbol);
+                return;
+            }
+
+            throw new IllegalArgumentException("unsupported Java host import kind: " + imported.kind());
+        }
+
+        private void putHostClass(String name, HostClassFacade value) {
+            if (hostClasses.putIfAbsent(name, value) != null || hostFunctions.containsKey(name)) {
+                throw new IllegalArgumentException("duplicate Java host import binding " + name);
+            }
+        }
+
+        private void putHostFunction(String name, Invokable value) {
+            if (hostFunctions.putIfAbsent(name, value) != null || hostClasses.containsKey(name)) {
+                throw new IllegalArgumentException("duplicate Java host import binding " + name);
             }
         }
 
@@ -182,6 +268,16 @@ public final class OresEvalRootNode extends RootNode {
             return callFunction(main, List.of(arguments));
         }
 
+        private Object invokePublic(String name, Object[] arguments) {
+            Ast.FunctionDecl fn = findFunction(name);
+            if (fn == null || fn.visibility() != Ast.Visibility.PUBLIC) {
+                throw new IllegalArgumentException("code unit '" + codeUnitId
+                        + "' does not export public function '" + name + "'");
+            }
+            Object result = callFunction(fn, java.util.Arrays.asList(arguments));
+            return result instanceof HostObjectFacade host ? host.value() : result;
+        }
+
         private Object callFunction(Ast.FunctionDecl fn, List<?> args) {
             List<?> normalized = normalizeFunctionArguments(fn, args);
             if (fn.actorKind() == Ast.ActorKind.NONE) {
@@ -192,9 +288,6 @@ public final class OresEvalRootNode extends RootNode {
                 case NONE -> throw new AssertionError("non-actor callable reached actor lowering");
                 case PRIVATE -> ActorRuntime.ActorKind.PRIVATE;
                 case SHARED -> ActorRuntime.ActorKind.SHARED;
-                case UNTRUSTED -> throw new SecurityException(
-                        "untrusted actor callables require GraalWasm sandbox lowering; "
-                                + "the ordinary JVM interpreter must not execute hostile guest code");
             };
 
             return context.actors().invoke(
@@ -274,12 +367,6 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private void executeStatement(Ast.Stmt stmt, Env env, ArrayDeque<Ast.Expr> deferred) {
-            // Every actor kind observes stop/turn-overrun signals at statement
-            // boundaries. UNTRUSTED actors additionally consume fuel here and
-            // at expression boundaries below.
-            if (ActorRuntime.inActorExecution() || ActorRuntime.inRootExecution()) {
-                context.schedulerSafepoint();
-            }
             if (stmt instanceof Ast.BindingStmt binding) {
                 if (binding.initializer() instanceof Ast.LambdaExpr) {
                     env.reserve(binding.name(), binding.kind());
@@ -325,7 +412,6 @@ public final class OresEvalRootNode extends RootNode {
                 catch (ReturnSignal signal) { throw signal; }
                 catch (OresPanic panic) { throw panic; }
                 catch (RuntimeException failure) {
-                    if (ActorRuntime.isActorControlAbort(failure)) throw failure;
                     Env catchEnv = new Env(env);
                     catchEnv.define(tried.errorName(), failure, Ast.BindingKind.VAL);
                     executeBlock(tried.catchBody(), catchEnv);
@@ -354,9 +440,6 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object eval(Ast.Expr expr, Env env) {
-            if (ActorRuntime.currentActorKind() == ActorRuntime.ActorKind.UNTRUSTED) {
-                context.schedulerSafepoint();
-            }
             if (expr instanceof Ast.LiteralExpr literal) {
                 if (literal.value() == null) throw new IllegalArgumentException("standalone null values are forbidden");
                 if (literal.value() instanceof Ast.Imaginary imaginary) return new Complex(0.0, imaginary.coefficient());
@@ -368,7 +451,6 @@ public final class OresEvalRootNode extends RootNode {
                 if (name.name().equals("stdio")) return new StdioFacade(context);
                 if (name.name().equals("process")) return new ProcessFacade(context);
                 if (name.name().equals("actor")) return new ActorFacade(context);
-                if (name.name().equals("Thread")) return new ThreadFacade(context);
                 if (name.name().equals("Mutex")) return new MutexFactory(false, context);
                 if (name.name().equals("SharedMutex")) return new MutexFactory(true, context);
                 if (name.name().equals("print")) return (Invokable) args -> {
@@ -388,6 +470,14 @@ public final class OresEvalRootNode extends RootNode {
                     requireOne(args, "Err");
                     return new ResultValue(false, args.getFirst());
                 };
+                HostClassFacade hostClass = hostClasses.get(name.name());
+                if (hostClass != null) {
+                    context.requireCapability(IsolatePolicy.Capability.JAVA_INTEROP,
+                            "Java host class " + hostClass.className());
+                    return hostClass;
+                }
+                Invokable hostFunction = hostFunctions.get(name.name());
+                if (hostFunction != null) return hostFunction;
                 Ast.ModuleDecl module = modules.get(name.name());
                 if (module != null) return new ModuleFacade(this, module);
                 Ast.ClassDecl klass = findClass(name.name());
@@ -503,41 +593,18 @@ public final class OresEvalRootNode extends RootNode {
                 throw new IllegalArgumentException("value is not indexable: " + receiver);
             }
             if (expr instanceof Ast.NewExpr created) {
-                if (created.type().name().equals("Thread")) {
-                    context.requireCapability(IsolatePolicy.Capability.THREAD_CREATE, "new Thread");
-                    if (ActorRuntime.inActorExecution()) {
-                        throw new SecurityException(
-                                "actors cannot create dedicated OS threads; use actor spawning/mailboxes instead");
-                    }
-                    if (created.arguments().size() < 1 || created.arguments().size() > 2) {
+                HostClassFacade hostClass = hostClasses.get(created.type().name());
+                if (hostClass != null) {
+                    context.requireCapability(IsolatePolicy.Capability.JAVA_INTEROP,
+                            "Java host constructor " + hostClass.className());
+                    if (!hostClass.constructible()) {
                         throw new IllegalArgumentException(
-                                "Thread constructor expects (nlex || -> { ... }) or (nlex || -> { ... }, String name)");
+                                "Java function namespace '" + created.type().name() + "' is not constructible");
                     }
-                    Ast.Expr targetExpr = created.arguments().getFirst();
-                    if (!(targetExpr instanceof Ast.LambdaExpr lambda)
-                            || !lambda.nonLexical()
-                            || !lambda.parameters().isEmpty()) {
-                        throw new IllegalArgumentException(
-                                "Thread target must be an inline zero-argument nlex lambda; activation-local captures cannot cross onto a dedicated pthread");
-                    }
-                    Object targetValue = eval(targetExpr, env);
-                    if (!(targetValue instanceof Invokable target)) {
-                        throw new IllegalArgumentException("Thread target is not callable");
-                    }
-                    String threadName = null;
-                    if (created.arguments().size() == 2) {
-                        Object rawName = eval(created.arguments().get(1), env);
-                        if (!(rawName instanceof String text)) {
-                            throw new IllegalArgumentException("Thread name must be a String");
-                        }
-                        threadName = text;
-                    }
-                    final String configuredName = threadName;
-                    return new OresThread(
-                            () -> context.executeExplicitThreadTurn(
-                                    () -> target.call(List.of())),
-                            configuredName);
+                    List<Object> args = created.arguments().stream().map(arg -> eval(arg, env)).toList();
+                    return instantiateHost(hostClass, args);
                 }
+
                 Ast.ClassDecl klass = findClass(created.type().name());
                 Evaluator owner = this;
                 if (klass == null) {
@@ -595,6 +662,16 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object member(Object receiver, String name) {
+            if (receiver instanceof HostClassFacade host) {
+                context.requireCapability(IsolatePolicy.Capability.JAVA_INTEROP,
+                        "Java host class " + host.className());
+                return hostMember(host.symbol(), host.className(), name);
+            }
+            if (receiver instanceof HostObjectFacade host) {
+                context.requireCapability(IsolatePolicy.Capability.JAVA_INTEROP,
+                        "Java host object member " + name);
+                return hostMember(host.value(), "host object", name);
+            }
             if (receiver instanceof StdioFacade stdio) {
                 return switch (name) {
                     case "print" -> (Invokable) stdio::print;
@@ -623,93 +700,6 @@ public final class OresEvalRootNode extends RootNode {
                 return switch (name) {
                     case "gc" -> (Invokable) actor::gc;
                     default -> throw new IllegalArgumentException("unknown actor member " + name);
-                };
-            }
-            if (receiver instanceof ThreadFacade thread) {
-                thread.context().requireCapability(IsolatePolicy.Capability.THREAD_CREATE, "Thread." + name);
-                return switch (name) {
-                    case "currentThread", "current_thread" -> (Invokable) args -> {
-                        requireZero(args, "Thread.currentThread");
-                        return OresThread.currentThread();
-                    };
-                    case "interrupted" -> (Invokable) args -> {
-                        requireZero(args, "Thread.interrupted");
-                        return OresThread.interrupted();
-                    };
-                    case "sleep" -> (Invokable) args -> {
-                        requireOne(args, "Thread.sleep");
-                        if (!(args.getFirst() instanceof Number number)) {
-                            throw new IllegalArgumentException("Thread.sleep expects integer milliseconds");
-                        }
-                        try {
-                            OresThread.sleep(number.longValue());
-                        } catch (InterruptedException interrupted) {
-                            throw new java.util.concurrent.CancellationException("Thread.sleep interrupted");
-                        }
-                        return null;
-                    };
-                    case "yield" -> (Invokable) args -> {
-                        requireZero(args, "Thread.yield");
-                        OresThread.yield();
-                        return null;
-                    };
-                    default -> throw new IllegalArgumentException("unknown Thread static member " + name);
-                };
-            }
-            if (receiver instanceof OresThread thread) {
-                return switch (name) {
-                    case "start" -> (Invokable) args -> {
-                        requireZero(args, "Thread.start");
-                        thread.start();
-                        return null;
-                    };
-                    case "join" -> (Invokable) args -> {
-                        requireZero(args, "Thread.join");
-                        try {
-                            thread.join();
-                        } catch (InterruptedException interrupted) {
-                            throw new java.util.concurrent.CancellationException("Thread.join interrupted");
-                        }
-                        return null;
-                    };
-                    case "interrupt" -> (Invokable) args -> {
-                        requireZero(args, "Thread.interrupt");
-                        thread.interrupt();
-                        return null;
-                    };
-                    case "isAlive", "is_alive" -> (Invokable) args -> {
-                        requireZero(args, "Thread.isAlive");
-                        return thread.isAlive();
-                    };
-                    case "isInterrupted", "is_interrupted" -> (Invokable) args -> {
-                        requireZero(args, "Thread.isInterrupted");
-                        return thread.isInterrupted();
-                    };
-                    case "getName", "name" -> (Invokable) args -> {
-                        requireZero(args, "Thread.getName");
-                        return thread.getName();
-                    };
-                    case "setName", "set_name" -> (Invokable) args -> {
-                        requireOne(args, "Thread.setName");
-                        if (!(args.getFirst() instanceof String text)) {
-                            throw new IllegalArgumentException("Thread.setName expects a String");
-                        }
-                        thread.setName(text);
-                        return null;
-                    };
-                    case "threadId", "thread_id", "getId" -> (Invokable) args -> {
-                        requireZero(args, "Thread.threadId");
-                        return thread.threadId();
-                    };
-                    case "isVirtual", "is_virtual" -> (Invokable) args -> {
-                        requireZero(args, "Thread.isVirtual");
-                        return thread.isVirtual();
-                    };
-                    case "getState", "state" -> (Invokable) args -> {
-                        requireZero(args, "Thread.getState");
-                        return thread.getState().name();
-                    };
-                    default -> throw new IllegalArgumentException("unknown Thread member " + name);
                 };
             }
             if (receiver instanceof MutexFactory factory) {
@@ -745,7 +735,76 @@ public final class OresEvalRootNode extends RootNode {
                 if (!map.containsKey(name)) throw new IllegalArgumentException("unknown obj member " + name);
                 return map.get(name);
             }
+            InteropLibrary foreign = InteropLibrary.getUncached(receiver);
+            if (foreign.hasMembers(receiver)) {
+                context.requireCapability(IsolatePolicy.Capability.JAVA_INTEROP,
+                        "Java host object member " + name);
+                return hostMember(receiver, "host object", name);
+            }
             throw new IllegalArgumentException("cannot access member '" + name + "' on " + receiver);
+        }
+
+        private Object hostMember(Object receiver, String ownerName, String name) {
+            InteropLibrary interop = InteropLibrary.getUncached(receiver);
+            if (interop.isMemberInvocable(receiver, name)) {
+                return (Invokable) args -> {
+                    context.requireCapability(
+                            IsolatePolicy.Capability.JAVA_INTEROP,
+                            "Java host member " + ownerName + "." + name);
+                    return invokeHostMember(receiver, name, args);
+                };
+            }
+            if (interop.isMemberReadable(receiver, name)) {
+                try {
+                    return normalizeHostResult(interop.readMember(receiver, name));
+                } catch (Exception failure) {
+                    throw hostInteropError("read Java member " + ownerName + "." + name, failure);
+                }
+            }
+            throw new IllegalArgumentException(
+                    "Java member is not exported by HostAccess: " + ownerName + "." + name);
+        }
+
+        private Object invokeHostMember(Object receiver, String name, List<Object> args) {
+            try {
+                Object[] unwrapped = args.stream().map(this::unwrapHostArgument).toArray();
+                Object result = InteropLibrary.getUncached(receiver).invokeMember(receiver, name, unwrapped);
+                return normalizeHostResult(result);
+            } catch (Exception failure) {
+                throw hostInteropError("invoke Java member " + name, failure);
+            }
+        }
+
+        private Object instantiateHost(HostClassFacade hostClass, List<Object> args) {
+            InteropLibrary interop = InteropLibrary.getUncached(hostClass.symbol());
+            if (!interop.isInstantiable(hostClass.symbol())) {
+                throw new IllegalArgumentException(
+                        "allowlisted Java host class is not constructible: " + hostClass.className());
+            }
+            try {
+                Object[] unwrapped = args.stream().map(this::unwrapHostArgument).toArray();
+                Object value = interop.instantiate(hostClass.symbol(), unwrapped);
+                return new HostObjectFacade(value);
+            } catch (Exception failure) {
+                throw hostInteropError("construct Java host class " + hostClass.className(), failure);
+            }
+        }
+
+        private Object normalizeHostResult(Object value) {
+            if (value == null) return new OptionValue(false, null);
+            if (value instanceof Number || value instanceof Boolean || value instanceof String
+                    || value instanceof Character || value instanceof CompletionStage<?>) {
+                return value;
+            }
+            return new HostObjectFacade(value);
+        }
+
+        private Object unwrapHostArgument(Object value) {
+            return value instanceof HostObjectFacade host ? host.value() : value;
+        }
+
+        private RuntimeException hostInteropError(String operation, Exception failure) {
+            return new IllegalArgumentException(operation + " failed: " + failure.getMessage(), failure);
         }
 
         private Object optionMember(OptionValue option, String name) {
@@ -906,8 +965,11 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private Object importedValue(String name) {
-            Ast.ImportDecl direct = namedImports.get(name);
-            if (direct != null) return importedTarget(direct).exportValue(direct.kind(), name);
+            ImportedBinding direct = namedImports.get(name);
+            if (direct != null) {
+                return importedTarget(direct.declaration())
+                        .exportValue(direct.declaration().kind(), direct.sourceName());
+            }
             Ast.ImportDecl namespace = namespaceImports.get(name);
             if (namespace != null) return new ImportedNamespace(importedTarget(namespace), namespace.kind());
             return Env.MISSING;
@@ -925,6 +987,9 @@ public final class OresEvalRootNode extends RootNode {
         }
 
         private String resolveImportUnitId(String rawPath) {
+            String hostResolved = context.resolvedLinkedImport(codeUnitId, rawPath);
+            if (hostResolved != null) return hostResolved;
+
             String raw = rawPath.replace('\\', '/');
             Path parent = Path.of(codeUnitId).getParent();
             Path candidatePath = raw.startsWith(".")
@@ -933,8 +998,9 @@ public final class OresEvalRootNode extends RootNode {
             String candidate = normalizeUnitId(candidatePath.toString());
             if (!context.hasLinkedCodeUnit(candidate)
                     && !candidate.endsWith(".ores")
-                    && context.hasLinkedCodeUnit(candidate + ".ores")) {
-                candidate += ".ores";
+                    && !candidate.endsWith(".java")) {
+                if (context.hasLinkedCodeUnit(candidate + ".ores")) candidate += ".ores";
+                else if (context.hasLinkedCodeUnit(candidate + ".java")) candidate += ".java";
             }
             return candidate;
         }
@@ -1175,13 +1241,6 @@ public final class OresEvalRootNode extends RootNode {
             if (left instanceof Number a && right instanceof Number b) return Double.compare(a.doubleValue(), b.doubleValue());
             if (left instanceof String a && right instanceof String b) return a.compareTo(b);
             throw new IllegalArgumentException("values are not comparable");
-        }
-
-        private long integral(Object value, String operator) {
-            if (value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long) {
-                return ((Number) value).longValue();
-            }
-            throw new IllegalArgumentException(operator + " requires integer operands");
         }
 
         private boolean truth(Object value) { if (value instanceof Boolean b) return b; throw new IllegalArgumentException("condition must be bool"); }
@@ -1446,10 +1505,14 @@ public final class OresEvalRootNode extends RootNode {
         @Override public String toString(){return klass.name()+fields;}
     }
 
+    private record ImportedBinding(Ast.ImportDecl declaration, String sourceName) { }
     private record ImportedNamespace(Evaluator owner, Ast.ImportKind kind) { }
     private record ModuleFacade(Evaluator owner, Ast.ModuleDecl module) { }
     private record ClassFacade(Evaluator owner, Ast.ClassDecl klass) { }
-    private record ThreadFacade(OresContext context) { }
+    private record HostClassFacade(String className, Object symbol, boolean constructible) { }
+    private record HostObjectFacade(Object value) {
+        @Override public String toString() { return String.valueOf(value); }
+    }
     private record MutexFactory(boolean shared, OresContext context) {
         private Object create(List<Object> args) {
             requireOne(args, shared ? "SharedMutex.new" : "Mutex.new");
@@ -1475,7 +1538,8 @@ public final class OresEvalRootNode extends RootNode {
             }
 
             if (value instanceof OresMutex.Local<?> || value instanceof OresMutex.Guard<?>
-                    || value instanceof CompletionStage<?> || value instanceof Invokable) {
+                    || value instanceof CompletionStage<?> || value instanceof Invokable
+                    || value instanceof HostClassFacade || value instanceof HostObjectFacade) {
                 return false;
             }
 
