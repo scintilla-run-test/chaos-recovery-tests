@@ -32,8 +32,10 @@ jobs:
           SH
           chmod +x target/oreslang-compiler
 
-      - name: Verify mirrored source identity
-        run: test "$(cat demo-source/SOURCE_SHA)" = "502fdddffa69d322a886a51512938fe23eb3c54c"
+      - name: Verify mirrored source identity and modes
+        run: |
+          test "$(cat demo-source/SOURCE_SHA)" = "502fdddffa69d322a886a51512938fe23eb3c54c"
+          chmod +x             demo-source/cli/run.sh             demo-source/desktop-app/run.sh             demo-source/web-server/run.sh             demo-source/interop/run-java-embeds-oreslang.sh             demo-source/interop/run-oreslang-embeds-java.sh
 
       - name: Compile hardened Java hosts
         run: |
@@ -45,9 +47,7 @@ jobs:
           mkdir -p "target/tmp root"
           (
             cd demo-source/cli
-            TMPDIR="$GITHUB_WORKSPACE/target/tmp root" \
-            ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/oreslang-compiler" \
-              ./run.sh
+            TMPDIR="$GITHUB_WORKSPACE/target/tmp root"             ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/oreslang-compiler"               ./run.sh
           ) | tee target/cli.out
           grep -Fx "Oreslang CLI demo" target/cli.out
           grep -Fx "19 + 23 =" target/cli.out
@@ -55,17 +55,9 @@ jobs:
 
       - name: Validate desktop manifest through hardened host
         run: |
-          cat \
-            demo-source/desktop-app/title.ores \
-            demo-source/desktop-app/body.ores \
-            demo-source/desktop-app/window.ores \
-            demo-source/desktop-app/DesktopApp.ores \
-            > target/DesktopApp.ores
+          cat             demo-source/desktop-app/title.ores             demo-source/desktop-app/body.ores             demo-source/desktop-app/window.ores             demo-source/desktop-app/DesktopApp.ores             > target/DesktopApp.ores
 
-          ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/oreslang-compiler" \
-            java demo-source/desktop-app/DesktopHost.java \
-              --manifest-only target/DesktopApp.ores \
-            | tee target/desktop.out
+          ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/oreslang-compiler"             java demo-source/desktop-app/DesktopHost.java               --manifest-only target/DesktopApp.ores             | tee target/desktop.out
 
           grep -Fx "Oreslang Desktop Demo" target/desktop.out
           grep -Fx "640" target/desktop.out
@@ -74,16 +66,9 @@ jobs:
 
       - name: Run web host and verify HTTP behavior
         run: |
-          cat \
-            demo-source/web-server/index.ores \
-            demo-source/web-server/health.ores \
-            demo-source/web-server/WebServer.ores \
-            > target/WebServer.ores
+          cat             demo-source/web-server/index.ores             demo-source/web-server/health.ores             demo-source/web-server/WebServer.ores             > target/WebServer.ores
 
-          PORT=18080 \
-          ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/oreslang-compiler" \
-            java demo-source/web-server/HttpHost.java target/WebServer.ores \
-            > target/web-host.log 2>&1 &
+          PORT=18080           ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/oreslang-compiler"             java demo-source/web-server/HttpHost.java target/WebServer.ores             > target/web-host.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
 
@@ -114,10 +99,7 @@ jobs:
           chmod +x target/must-not-run
 
           set +e
-          PORT=70000 \
-          ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/must-not-run" \
-            java demo-source/web-server/HttpHost.java target/WebServer.ores \
-            > target/invalid-port.out 2>&1
+          PORT=70000           ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/must-not-run"             java demo-source/web-server/HttpHost.java target/WebServer.ores             > target/invalid-port.out 2>&1
           rc=$?
           set -e
 
@@ -135,11 +117,7 @@ jobs:
           chmod +x target/noisy-compiler
 
           set +e
-          timeout 15s env \
-            ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/noisy-compiler" \
-            java demo-source/desktop-app/DesktopHost.java \
-              --manifest-only target/DesktopApp.ores \
-            > target/noisy.out 2>&1
+          timeout 15s env             ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/noisy-compiler"             java demo-source/desktop-app/DesktopHost.java               --manifest-only target/DesktopApp.ores             > target/noisy.out 2>&1
           rc=$?
           set -e
 
@@ -151,9 +129,7 @@ jobs:
         run: |
           (
             cd demo-source/interop
-            TMPDIR="$GITHUB_WORKSPACE/target/tmp root" \
-            ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/oreslang-compiler" \
-              ./run-oreslang-embeds-java.sh
+            TMPDIR="$GITHUB_WORKSPACE/target/tmp root"             ORESLANG_COMPILER="$GITHUB_WORKSPACE/target/oreslang-compiler"               ./run-oreslang-embeds-java.sh
           ) | tee target/ores-to-java.out
           grep -Fx "42" target/ores-to-java.out
 
@@ -161,7 +137,6 @@ jobs:
         run: |
           (
             cd demo-source/interop
-            ORESLANG_CLASSPATH="$GITHUB_WORKSPACE/target/classes:$(cat "$GITHUB_WORKSPACE/target/classpath.txt")" \
-              ./run-java-embeds-oreslang.sh
+            ORESLANG_CLASSPATH="$GITHUB_WORKSPACE/target/classes:$(cat "$GITHUB_WORKSPACE/target/classpath.txt")"               ./run-java-embeds-oreslang.sh
           ) | tee target/java-to-ores.out
           grep -Fx "java host <- oreslang guest: 42" target/java-to-ores.out
