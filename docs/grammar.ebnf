@@ -8,7 +8,7 @@ import_spec     = "*" "as" IDENT
                 | "module" import_names
                 | "class" import_names
                 | "fnc" import_names ;
-import_names    = IDENT
+import_names    = IDENT [ "as" IDENT ]
                 | "{" IDENT { "," IDENT } "}"
                 | "*" "as" IDENT ;
 
@@ -41,10 +41,10 @@ callable_decl   = { annotation } visibility { callable_modifier } callable_kind 
 callable_kind   = "fnc" | "routine" ;
 
 actor_callable_decl
-                = { annotation } visibility [ "async" ] [ "nlex" ] [ "shared" | "untrusted" ] "actor" "fnc" IDENT [ generic_params ]
+                = { annotation } visibility [ "async" ] [ "nlex" ] [ "shared" ] "actor" "fnc" IDENT [ generic_params ]
                   "(" [ param_list ] ")" return_spec block ;
 
-actor_decl      = visibility [ "shared" | "untrusted" ] "actor" IDENT [ generic_params ]
+actor_decl      = visibility [ "shared" ] "actor" IDENT [ generic_params ]
                   [ "extends" type_ref { "," type_ref } ]
                   [ ( "implements" | "impl" ) type_ref { "," type_ref } ]
                   actor_body ;
@@ -244,9 +244,7 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - "=>" belongs to named callable return declarations.
    - "->" belongs to function types and lambdas.
    - Unqualified "actor" declarations are private actors; "shared actor" opts
-     into the SHARED_MEMORY execution domain; "untrusted actor" opts into the
-     adversarial, memory-isolated, hard-budgeted sandbox domain. "shared" and
-     "untrusted" are mutually exclusive.
+     into the SHARED_MEMORY execution domain.
    - Actor fields are private mailbox-owned state; public actor API is exposed
      through actor methods/messages rather than public mutable fields.
    - Actor inheritance must preserve actor isolation kind.
@@ -261,9 +259,7 @@ member_terminator = ";" | INTERFACE_CLOSING_BOUNDARY ;
    - named class/interface types are nominal by default.
    - @Structural, name structural Type, or @AllowStructural(name) opt a
      parameter into public-shape compatibility.
-   - every loop iteration contains an injected scheduler safepoint; untrusted
-     actor statement/expression execution and call/recursion boundaries are
-     metered as additional checkpoints.
+   - every loop iteration contains an injected scheduler safepoint.
    - [Symbol.iterator]() may provide iterator behavior for for-of.
    - standalone null values are illegal.
    - null is a type marker only directly inside Option<null>.
