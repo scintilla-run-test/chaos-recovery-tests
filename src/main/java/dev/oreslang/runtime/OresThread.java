@@ -172,11 +172,19 @@ public final class OresThread {
     }
 
     public static void sleep(long millis) throws InterruptedException {
-        if (CURRENT.get() == null) {
+        OresThread current = CURRENT.get();
+        if (current == null) {
             throw new IllegalStateException(
                     "Thread.sleep() may not block a scheduler-owned actor/root carrier");
         }
-        Thread.sleep(millis);
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException interrupted) {
+            // Match java.lang.Thread: throwing InterruptedException consumes
+            // the interrupted status.
+            current.interrupted.set(false);
+            throw interrupted;
+        }
     }
 
     public static void yield() {
