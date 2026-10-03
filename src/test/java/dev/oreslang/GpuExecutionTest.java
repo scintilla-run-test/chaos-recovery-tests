@@ -668,6 +668,41 @@ final class GpuExecutionTest {
     }
 
     @Test
+    void zeroBoundCanonicalLoopAlsoCarriesSkipLaunchContract() {
+        GpuKernelCompiler.GpuKernel kernel = OresCompiler.compile("""
+                gpu fnc noop(GpuArray<i32> mut out) => void {
+                  for (let u64 i = 0; i < 0; i = i + 1) {
+                    out[i] = 1;
+                  }
+                  return;
+                }
+                """).gpuProgram().kernels().getFirst();
+
+        assertEquals(GpuKernelCompiler.ExecutionShape.DATA_PARALLEL_1D, kernel.executionShape());
+        assertEquals("0", kernel.launchPlan().globalWorkItemsExpression());
+        assertTrue(kernel.launchPlan().skipLaunchWhenGlobalWorkItemsZero());
+    }
+
+    @Test
+    void simtKernelRejectsHiddenMutableBufferWritesThroughHelpers() {
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> OresCompiler.compile("""
+                        gpu fnc write(GpuArray<i32> mut out) => void {
+                          out[gpu.index] = 1;
+                          return;
+                        }
+
+                        gpu fnc outer(GpuArray<i32> mut out) => void {
+                          val u64 i = gpu.index;
+                          write(out);
+                          return;
+                        }
+                        """));
+
+        assertTrue(failure.getMessage().contains("interprocedural race-freedom"));
+    }
+
+    @Test
     void simtMutableBufferWritesRequireAUniqueGlobalWorkItemIndex() {
         IllegalArgumentException constant = assertThrows(IllegalArgumentException.class,
                 () -> OresCompiler.compile("""
