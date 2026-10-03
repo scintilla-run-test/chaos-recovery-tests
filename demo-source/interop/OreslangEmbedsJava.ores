@@ -1,0 +1,19 @@
+define module embedded_java
+  pub fnc emit() => void {
+    stdio.println("public final class HelloFromGeneratedJava {");
+    stdio.println("    private HelloFromGeneratedJava() { }");
+    stdio.println("");
+    stdio.println("    public static void main(String[] args) {");
+    stdio.println("        int left = 19;");
+    stdio.println("        int right = 23;");
+    stdio.println("        System.out.println(left + right);");
+    stdio.println("    }");
+    stdio.println("}");
+    return;
+  }
+end
+
+pub routine main() => void {
+  embedded_java.emit();
+  return;
+}
