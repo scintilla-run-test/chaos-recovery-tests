@@ -62,8 +62,8 @@ final class OresThreadTest {
         thread.join();
 
         assertTrue(observed.get());
-        assertTrue(thread.isInterrupted(),
-                "logical interrupt intent remains observable after termination");
+        assertFalse(thread.isInterrupted(),
+                "InterruptedException consumes the explicit Thread interrupt status like java.lang.Thread");
     }
 
     @Test
@@ -75,7 +75,7 @@ final class OresThreadTest {
         AtomicReference<Throwable> failure = new AtomicReference<>();
 
         try (ActorRuntime runtime = new ActorRuntime(policy, config)) {
-            var ref = runtime.<Integer>spawnSharedTrusted(() -> (message, context) -> {
+            var ref = runtime.<Integer>spawnSharedTrusted(factoryContext -> (message, context) -> {
                 try {
                     new OresThread(() -> { }).start();
                 } catch (Throwable expected) {
