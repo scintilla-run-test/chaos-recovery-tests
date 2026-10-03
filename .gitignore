@@ -1,18 +1,6 @@
-.env
-.env.*
-!.env.example
-__pycache__/
-*.py[cod]
-.coverage
-htmlcov/
-.venv/
-
-# >>> ores fleet hygiene — managed block, edits below are overwritten >>>
-tmp/temp/
-tmp/worktrees/
-# <<< ores fleet hygiene <<<
-
-# Repository-local temporary data and authorized Git worktrees
-tmp
-temp
-temp/worktrees
+target/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+*.log
