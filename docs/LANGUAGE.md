@@ -899,8 +899,8 @@ The parser reserves dimensions 0, 1, and 2, but the current automatic launch con
 intentionally 1-D, so dimensions 1 and 2 fail closed until explicit 2-D/3-D grid geometry
 is added.
 
-When a kernel body uses a work-item intrinsic, its global extent is inferred without a
-fake serial loop:
+When a kernel body uses a work-item intrinsic — directly or transitively through a
+statically resolved GPU helper — its global extent is inferred without a fake serial loop:
 
 1. prefer the single mutable buffer parameter (the normal output-buffer case);
 2. otherwise, a single buffer parameter may drive a map-style kernel;
@@ -955,8 +955,10 @@ GPU access than pointer-rich arrays of host objects. That is a performance guide
 not a separate type-system rule.
 
 The compiler emits hidden lengths for every flat buffer and bounds-checks indexed access.
-Buffers emitted with `restrict` carry a no-alias launch contract that the physical
-launcher must enforce.
+Kernel-entry buffers emitted with `restrict` carry a no-alias launch contract that
+the physical launcher must enforce. Internal GPU helper parameters deliberately omit
+`restrict`; alias promises belong at the host-enforceable kernel ABI boundary, not in
+device-to-device helper calls.
 
 For explicit SIMT kernels, mutable-buffer stores must also be race-free. The current
 conservative proof accepts a direct `gpu.index` / `gpu.global_id(0)` index or an
@@ -1010,7 +1012,10 @@ when generated code actually needs `double`.
 
 The generated manifest records kernel symbols, helper symbols, parameter ABI metadata,
 launch shape, launch extent, result/error slot counts, required extensions, no-alias
-requirements, and a source digest. The current Truffle evaluator still has no CPU
+requirements, and a source digest. GPU ABI v2 also carries an explicit
+`skipLaunchWhenGlobalWorkItemsZero` contract: zero-extent data-parallel work is completed
+without submitting an invalid zero-size OpenCL 1.2 launch. The current Truffle evaluator
+still has no CPU
 emulation path for GPU code: invoking a GPU target without a configured physical backend
 fails closed.
 
