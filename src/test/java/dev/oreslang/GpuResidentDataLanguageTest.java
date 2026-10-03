@@ -51,11 +51,11 @@ final class GpuResidentDataLanguageTest {
                     .build()) {
                 context.eval(OresLanguage.ID, """
                         pub routine main() => void {
-                          const cpu = [1, 2, 3];
-                          const values = GpuArray.from_cpu(cpu);
-                          const n = values.length();
-                          const stream = values.stream();
-                          const collected = stream.collect();
+                          val cpu = [1, 2, 3];
+                          val values = GpuArray.from_cpu(cpu);
+                          val n = values.length();
+                          val stream = values.stream();
+                          val collected = stream.collect();
                           let cpu_again = collected.copy_to_cpu();
                           cpu_again[0] = 99;
                           return;
