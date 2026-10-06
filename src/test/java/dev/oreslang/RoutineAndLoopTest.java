@@ -243,7 +243,7 @@ final class RoutineAndLoopTest {
                 IllegalArgumentException.class,
                 () -> Parser.parse("""
                         pub routine main(): void {
-                          for [key, value] of arr[(1, 2)] do
+                          for [key, value] of arr[tuple (1, 2)] do
                             stdio.stdout.write(key);
                           done
                           return;
@@ -432,12 +432,12 @@ final class RoutineAndLoopTest {
     void forOfSequencePatternsDestructureTupleElements() throws Exception {
         String output = run("""
                 pub routine main(): void {
-                  for const [key, value] of arr[(1, "a"), (2, "b")] do
+                  for const [key, value] of arr[tuple (1, "a"), tuple (2, "b")] do
                     stdio.stdout.write(key);
                     stdio.stdout.write(value);
                   done
 
-                  for const [_, let value] of arr[(9, 3), (8, 4)] {
+                  for const [_, let value] of arr[tuple (9, 3), tuple (8, 4)] {
                     value = value + 1;
                     stdio.stdout.write(value);
                   }

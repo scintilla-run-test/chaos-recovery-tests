@@ -37,7 +37,7 @@ final class StdioLogAndSpreadTest {
                   val parts = arr["A", 1, "B", true];
                   stdio.stdout.log(...parts);
                   stdio.stdout.logList(parts);
-                  stdio.stdout.logList(("X", 2, "Y"));
+                  stdio.stdout.logList(tuple ("X", 2, "Y"));
                   return;
                 }
                 """);
@@ -123,7 +123,7 @@ final class StdioLogAndSpreadTest {
     void mixedSpreadArgumentsPreserveLeftToRightFlattening() throws Exception {
         String output = run("""
                 pub routine main(): void {
-                  stdio.stdout.log("A", ...arr[1, 2], "B", ...("C", 3));
+                  stdio.stdout.log("A", ...arr[1, 2], "B", ...tuple ("C", 3));
                   return;
                 }
                 """);

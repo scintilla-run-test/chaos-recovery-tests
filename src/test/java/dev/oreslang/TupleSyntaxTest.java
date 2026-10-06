@@ -409,9 +409,9 @@ final class TupleSyntaxTest {
     }
 
     @Test
-    void oneElementTupleTypeAndValueStayDistinctFromGrouping() {
+    void singletonTupleUsesExplicitTypeWhileParenthesesRemainGrouping() {
         assertDoesNotThrow(() -> TypeChecker.check(Parser.parse("""
-                type One = (int,);
+                type One = Tuple[int];
 
                 fnc one(): One {
                   return tuple (5);
@@ -429,6 +429,11 @@ final class TupleSyntaxTest {
                   return;
                 }
                 """)));
+
+        IllegalArgumentException reserved = assertThrows(
+                IllegalArgumentException.class,
+                () -> Parser.parse("type One = (int,);"));
+        assertTrue(reserved.getMessage().contains("singleton tuple type shorthand"));
     }
 
 }
