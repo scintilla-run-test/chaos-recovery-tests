@@ -1063,9 +1063,9 @@ public final class Parser {
                 boolean intrinsicSequence = isIntrinsicSequenceTypeName(name);
                 boolean namedSeen = false;
                 do {
-                    if (check(IDENT) && checkNext(EQUAL)) {
+                    if (isNamedTypeParameterStart()) {
                         namedSeen = true;
-                        String parameterName = advance().lexeme();
+                        String parameterName = consumeNamedTypeParameterName();
                         consume(EQUAL, "expected '=' after named type parameter");
                         args.add(Ast.TypeRef.namedParameter(parameterName, parseMetaValue()));
                     } else {

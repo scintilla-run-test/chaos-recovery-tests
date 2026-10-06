@@ -2295,7 +2295,7 @@ public final class TypeChecker {
                     Type expectedPattern = resolveParam(param, classGenerics, constructorSelf);
                     Type expected = substituteGenerics(expectedPattern, classBindings);
                     requireAssignable(
-                            typeOf(constructorArgs.get(i), env, generics, self),
+                            typeOfAgainstExpected(constructorArgs.get(i), expected, env, generics, self),
                             expected,
                             "constructor parameter " + param.name());
                 }
@@ -2327,7 +2327,7 @@ public final class TypeChecker {
                 if (supplied != null) {
                     Type fieldPattern = classFieldType(resolvedField.owner(), field);
                     Type expected = substituteGenerics(fieldPattern, classGenericBindings(resolvedField.owner(), resolvedField.ownerType()));
-                    requireAssignable(typeOf(supplied, env, generics, self),
+                    requireAssignable(typeOfAgainstExpected(supplied, expected, env, generics, self),
                             expected, "constructor field " + field.name());
                 } else if (field.initializer() == null) {
                     throw new IllegalArgumentException("constructor for " + klass.name() + " is missing field '" + field.name() + "'");
@@ -2552,6 +2552,7 @@ public final class TypeChecker {
         }
         if (expr instanceof Ast.ListExpr list) {
             if (expected instanceof ListType sequenceExpected) {
+                Type inferredElement = null;
                 for (int i = 0; i < list.elements().size(); i++) {
                     Type actual = typeOfAgainstExpected(
                             list.elements().get(i),
@@ -2563,8 +2564,14 @@ public final class TypeChecker {
                             actual,
                             sequenceExpected.element(),
                             "sequence literal element " + i);
+                    Type widened = widenCollectionElement(actual);
+                    inferredElement = inferredElement == null
+                            ? widened
+                            : collectionElementJoin(inferredElement, widened);
                 }
-                return sequenceExpected;
+                return new ListType(
+                        inferredElement == null ? Unknown.INSTANCE : inferredElement,
+                        sequenceExpected.kind());
             }
             if (expected instanceof Tuple tupleExpected) {
                 return new Tuple(list.elements().stream().map(item -> typeOf(item, env, generics, self)).toList(),
@@ -5290,8 +5297,9 @@ public final class TypeChecker {
             }
             for (int i = 0; i < exact.size(); i++) {
                 Type expected = resolve(exact.get(i), generics, self);
-                Type actual = typeOf(literal.elements().get(i), env, generics, self);
-                requireAssignable(actual, expected, name + " literal element " + i);
+                Type actual = typeOfAgainstExpected(
+                        literal.elements().get(i), expected, env, generics, self);
+                requireAssignable(actual, expected, name + " fixed sequence literal element " + i);
             }
             return;
         }

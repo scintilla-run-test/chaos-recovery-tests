@@ -879,6 +879,15 @@ public final class OwnershipChecker {
             ValueInfo sumCall = checkBuiltinSumCall(member, call.arguments(), scope);
             if (sumCall != null) return sumCall;
 
+            // Equality inspection is read-only. The type checker decides whether
+            // isEqualsTo is a valid builtin/user method; ownership must not move
+            // either operand merely to compare it.
+            if (member.member().equals("isEqualsTo") && call.arguments().size() == 1) {
+                checkExpr(member.receiver(), scope, false);
+                checkExpr(call.arguments().getFirst(), scope, false);
+                return new ValueInfo(Ast.TypeRef.simple("bool"), ValueKind.COPY, null);
+            }
+
             Ast.ClassDecl staticClass = classNamespaceOf(member.receiver(), scope);
             if (staticClass != null) {
                 Ast.MethodDecl staticFunction = findStaticMethod(
